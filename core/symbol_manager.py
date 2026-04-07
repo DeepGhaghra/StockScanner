@@ -61,6 +61,9 @@ INDEX_SOURCES: dict[str, str] = {
     "Nifty India Defence":     f"{NSE_BASE}/ind_niftyindiadefence.csv",       # falls back to static
     "Nifty CPSE":              f"{NSE_BASE}/ind_niftycpselist.csv",
     "Nifty MNC":               f"{NSE_BASE}/ind_niftymnclist.csv",
+    # Exchange Wide (Fyers Master)
+    "ALL NSE":                 "https://public.fyers.in/sym_details/NSE_CM.csv",
+    "ALL BSE":                 "https://public.fyers.in/sym_details/BSE_CM.csv",
 }
 
 # Fallback static data for indices where NSE archive CSV is not publicly available.
@@ -236,6 +239,55 @@ def _parse_nse_csv(df: pd.DataFrame) -> Optional[list[str]]:
     return [s for s in symbols if s]
 
 
+# ─── Fyers Master Fetch Logic ───────────────────────────────────────────────
+
+def _fetch_fyers_master(url: str, exchange_prefix: str) -> list[str]:
+    """Download Fyers Symbol Master CSV and return formatted symbols"""
+    try:
+        logger.info(f"[SymbolManager] Downloading Fyers master from {url}...")
+        resp = requests.get(url, timeout=30)
+        resp.raise_for_status()
+
+        # Fyers CSV format (NSE_CM/BSE_CM): 
+        # Token, Description, Symbol, Type, Lot, Tick, ISIN...
+        # We need the 3rd column (Symbol) and filter for Type 10 (Equity)
+        from io import StringIO
+        import csv
+        
+        fyers_symbols = []
+        f = StringIO(resp.text)
+        reader = csv.reader(f)
+        
+        for row in reader:
+            if len(row) < 11: continue
+            
+            # Column mapping from inspection:
+            # 9: Standard Fyers Symbol (e.g., NSE:RELIANCE-EQ)
+            # 10: Instrument Type (10 = Equity)
+            raw_symbol = row[9].strip()
+            inst_type = row[10].strip()
+            
+            # Type 10 = Equity (Stocks)
+            if inst_type == "10":
+                # Fyers already provides it with prefix like NSE:SYMBOL-EQ
+                # We normalize it for our internal storage
+                if ":" in raw_symbol:
+                    # e.g. NSE:RELIANCE-EQ (This is perfect)
+                    fyers_symbols.append(raw_symbol)
+                else:
+                    # In case prefix is missing (safety)
+                    clean_sym = raw_symbol
+                    if not clean_sym.endswith("-EQ"):
+                        clean_sym = f"{clean_sym}-EQ"
+                    fyers_symbols.append(f"{exchange_prefix}:{clean_sym}")
+        
+        return sorted(list(set(fyers_symbols)))
+
+    except Exception as e:
+        logger.error(f"[SymbolManager] Fyers Master fetch failed: {e}")
+        return []
+
+
 # ─── Public API ───────────────────────────────────────────────────────────────
 
 def get_available_indices() -> list[str]:
@@ -264,20 +316,30 @@ def get_symbols(index_name: str, force_refresh: bool = False) -> list[str]:
         if cached:
             return cached
 
-    # 2. Fetch fresh from NSE
+    # 2. Fetch fresh from source
     url = INDEX_SOURCES[index_name]
-    logger.info(f"[SymbolManager] Fetching {index_name} from NSE...")
-
-    df = _fetch_nse_csv(url)
-    if df is not None:
-        nse_symbols = _parse_nse_csv(df)
-        if nse_symbols:
-            fyers_symbols = _nse_symbols_to_fyers(nse_symbols)
+    
+    # Check if it's an ALL Exchange case
+    if index_name.startswith("ALL "):
+        prefix = "NSE" if "NSE" in index_name else "BSE"
+        fyers_symbols = _fetch_fyers_master(url, prefix)
+        if fyers_symbols:
             _write_cache(index_name, fyers_symbols)
             logger.info(f"[SymbolManager] Cached {len(fyers_symbols)} symbols for {index_name}")
             return fyers_symbols
+    else:
+        # Standard NSE Index CSV
+        logger.info(f"[SymbolManager] Fetching {index_name} from NSE...")
+        df = _fetch_nse_csv(url)
+        if df is not None:
+            nse_symbols = _parse_nse_csv(df)
+            if nse_symbols:
+                fyers_symbols = _nse_symbols_to_fyers(nse_symbols)
+                _write_cache(index_name, fyers_symbols)
+                logger.info(f"[SymbolManager] Cached {len(fyers_symbols)} symbols for {index_name}")
+                return fyers_symbols
 
-    logger.warning(f"[SymbolManager] NSE fetch failed for '{index_name}'.")
+    logger.warning(f"[SymbolManager] Fetch failed for '{index_name}'.")
 
     # 3. Stale cache fallback
     cached = _read_cache(index_name)

@@ -90,7 +90,7 @@ def run_scan(
             "RSI": round(float(last["rsi_14"]), 1) if pd.notna(last["rsi_14"]) else None,
             "Volume": int(last["volume"]),
             "Vol Ratio": round(float(last["vol_ratio"]), 2) if pd.notna(last["vol_ratio"]) else None,
-            "Candle Date": last["datetime"].strftime("%Y-%m-%d %H:%M"),
+            "Candle Date": last["datetime"].strftime("%d-%m-%Y %H:%M:%S"),
             "Signal": "BUY",
             "_details": details,
             "_df": df.tail(10).to_dict("records"),  # last 10 candles for detail view
@@ -109,6 +109,8 @@ def get_indicator_snapshot(symbol_row: dict) -> pd.DataFrame:
     details = symbol_row.get("_details", {})
     rows = []
     for strategy, d in details.items():
-        for k, v in d.items():
-            rows.append({"Strategy": strategy, "Parameter": k, "Value": v})
+        if isinstance(d, dict):
+            for k, v in d.items():
+                # Force strictly string to avoid pyarrow mix-type errors
+                rows.append({"Strategy": str(strategy), "Parameter": str(k), "Value": str(v)})
     return pd.DataFrame(rows)

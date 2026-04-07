@@ -29,7 +29,8 @@ from auth import (
     load_token,
     get_token_info,
 )
-from core.data_fetcher import get_fyers_client, clear_cache
+from core.data_fetcher import fetch_ohlcv, get_fyers_client, clear_cache
+from core.indicators import add_all_indicators
 from core.scanner import run_scan
 from core.strategy_engine import STRATEGIES, STRATEGY_DESCRIPTIONS, STRATEGY_PARAMS
 from core.symbol_manager import (
@@ -140,14 +141,104 @@ with col_status:
 st.divider()
 
 # ─── Tabs ─────────────────────────────────────────────────────────────────────
-tab_scanner, tab_details, tab_indices, tab_settings, tab_watchlist = st.tabs(
-    ["🔍 Scanner", "📊 Results Detail", "📑 Index Manager", "⚙️ Settings & Auth", "📂 Watchlist"]
+tab_scanner, tab_hunter, tab_details, tab_indices, tab_settings, tab_watchlist = st.tabs(
+    ["🔍 Scanner", "🧬 Signal Hunter", "📊 Results Detail", "📑 Index Manager", "⚙️ Settings & Auth", "📂 Watchlist"]
 )
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# TAB 1: SCANNER
+# TAB 2: SIGNAL HUNTER (REVERSE SCAN)
 # ═══════════════════════════════════════════════════════════════════════════════
+with tab_hunter:
+    st.markdown("### 🧬 Signal Hunter (Historical Backtest)")
+    st.info("Select a stock and a strategy to find all historical trade dates.")
+
+    h1, h2, h3, h4 = st.columns([2, 2, 2, 1])
+    with h1:
+        final_sym = st.text_input("🎯 Enter Stock Symbol", value="NSE:SBIN-EQ", placeholder="e.g. NSE:RELIANCE or BSE:532174").upper()
+        st.caption("💡 NSE:SBIN-EQ, BSE:500112-B")
+
+    with h2:
+        h_strat = st.selectbox("🎯 Strategy", options=list(STRATEGIES.keys()), key="h_st")
+        h_res = st.selectbox("⏳ Timeframe", options=["15", "60", "1D", "1W", "1M"], index=2, key="h_rs")
+    
+    with h3:
+        h_lookback = st.selectbox("📅 Search Period", options=["3 Months", "6 Months", "1 Year", "2 Years", "Max"], index=2)
+        
+    with h4:
+        st.markdown("<div style='margin-top: 24px;'></div>", unsafe_allow_html=True)
+        hunt_btn = st.button("🔥 HUNT", use_container_width=True, type="primary")
+
+    if hunt_btn:
+        fyers = get_fyers()
+        if not fyers:
+            st.error("Please login first!")
+        else:
+            with st.spinner(f"Hunting {h_strat} signals for {final_sym}..."):
+                # Fetch more data for backtesting (Buffer for SMA)
+                days_map = {"3 Months": 90, "6 Months": 180, "1 Year": 365, "2 Years": 730, "Max": 1500}
+                lookback_days = days_map.get(h_lookback, 365)
+                
+                # Normalize symbol
+                clean_sym = final_sym.strip().upper()
+                
+                # Full history is loaded from DB (since 1994)
+                df = fetch_ohlcv(fyers, clean_sym, h_res, date.today(), lookback_days + 100)
+                
+                if df is not None and len(df) > 52:
+                    df = add_all_indicators(df)
+                    
+                    # Optimization: Only run backtest on the user's requested period
+                    # Filter data to start from (today - lookback_days)
+                    start_date_limit = pd.Timestamp(date.today() - timedelta(days=lookback_days))
+                    backtest_df = df[df["datetime"] >= start_date_limit].copy()
+                    
+                    # We still need the original df for ATH calculation within the strategy
+                    # But the loop should only run on backtest_df indices
+                    
+                    strat_func = STRATEGIES[h_strat]
+                    strat_params = STRATEGY_PARAMS.get(h_strat, {})
+
+                    signals = []
+                    # Find where backtest_df starts in the main df
+                    if not backtest_df.empty:
+                        start_offset = df.index[df['datetime'] == backtest_df.iloc[0]['datetime']][0]
+                        # Start from offset OR 52 (indicator buffer), whichever is later
+                        start_pos = max(start_offset, 52)
+                        
+                        for i in range(start_pos, len(df)):
+                            sub_df = df.iloc[:i+1]
+                            res = strat_func(sub_df, strat_params)
+                            if res.matched:
+                                row = df.iloc[i]
+                                signals.append({
+                                    "Date": row["datetime"].strftime("%d-%m-%Y %H:%M:%S"),
+                                    "Price": round(row["close"], 2),
+                                    "Details": ", ".join([f"{k}: {v}" for k, v in res.details.items() if k != "close" and k != "price"])
+                                })
+                    
+                    if signals:
+                        st.success(f"Found {len(signals)} signals!")
+                        signals_df = pd.DataFrame(signals).iloc[::-1]
+                        st.dataframe(signals_df, use_container_width=True)
+                    else:
+                        st.info("No signals found in the selected period.")
+                        with st.expander("🛠️ Debug Information (Why 0 signals?)", expanded=False):
+                            st.write(f"Symbol: `{final_sym}`")
+                            st.write(f"Rows fetched after parsing: `{len(df)}`")
+                            st.write(f"Strategy: `{h_strat}`")
+                            st.write(f"Resolution Used: `{h_res}`")
+                else:
+                    st.error("No Data Found or Symbol Invalid!")
+                    with st.expander("🚨 Detailed Error Log", expanded=True):
+                        st.write(f"User Input: `{final_sym}`")
+                        st.write(f"Timeframe: `{h_res}`")
+                        st.write(f"Data Status: `{'API EMPTY (0 rows)' if df is not None else 'API ERROR (None response)'}`")
+                        st.write(f"Lookback: `{lookback_days} days`")
+                        if st.button("Force Clear Resolver Cache", help="Click if symbols are stuck"):
+                            clear_cache()
+                            st.rerun()
+                            st.rerun()
 with tab_scanner:
 
     # ─── Scanner Command Center (Main View) ──────────────────────────────────
@@ -197,6 +288,8 @@ with tab_scanner:
                     if "proximity_pct" in defaults: p["proximity_pct"] = pc[1].number_input("SMA%", 0.5, 5.0, float(defaults["proximity_pct"]), 0.5, key=f"p_{s}_px")
                     if "rsi_threshold" in defaults: p["rsi_threshold"] = pc[0].number_input("RSI", 40.0, 85.0, float(defaults["rsi_threshold"]), 5.0, key=f"p_{s}_rs")
                     if "vol_multiplier" in defaults: p["vol_multiplier"] = pc[1].number_input("VolX", 1.0, 5.0, float(defaults["vol_multiplier"]), 0.5, key=f"p_{s}_vl")
+                    if "abc_proximity_pct" in defaults: p["abc_proximity_pct"] = pc[0].number_input("Prox%", 0.1, 3.0, float(defaults["abc_proximity_pct"]), 0.1, key=f"p_{s}_abc")
+                    if "ath_threshold_pct" in defaults: p["ath_threshold_pct"] = pc[1].number_input("ATH%", 0.1, 15.0, float(defaults["ath_threshold_pct"]), 0.5, key=f"p_{s}_ath")
                     strategy_params[s] = p
         
         strategy_logic = "OR" # Compact logic
@@ -539,6 +632,73 @@ with tab_settings:
             st.session_state.scan_results = None
             st.success("Cache cleared.")
 
+    st.divider()
+    st.markdown("### 🗄️ Local Database Monitor")
+    try:
+        from core.database import StockDatabase
+        db_inst = StockDatabase()
+        stats = db_inst.get_db_stats()
+        st.metric("Total Symbols Cached", stats["total_symbols"])
+        st.metric("Total Rows (since 1994)", f"{stats['total_rows']:,}")
+        st.info("💡 Data is stored in `data/stock_scanner.db`. Daily resolution is automatically synced from 1994 on first search.")
+    except Exception as e:
+        st.error(f"Database Error: {e}")
+
+    st.divider()
+    st.markdown("### 🚀 Historical Bulk Sync Hub")
+    st.caption("One-time mass download to fill your local database since 1994.")
+    
+    sync_group_options = ALL_INDICES + [CUSTOM_OPT]
+    sync_group = st.selectbox("🎯 Select Group to Sync", options=sync_group_options, key="sync_grp_sel")
+    sync_symbols = cached_get_symbols(sync_group)
+    
+    if "sync_running" not in st.session_state: st.session_state.sync_running = False
+    if "sync_stop" not in st.session_state: st.session_state.sync_stop = False
+
+    col_s1, col_s2 = st.columns(2)
+    
+    if not st.session_state.sync_running:
+        if col_s1.button("🔥 START BULK SYNC", use_container_width=True, type="primary"):
+            st.session_state.sync_running = True
+            st.session_state.sync_stop = False
+            st.rerun()
+    else:
+        if col_s1.button("🛑 STOP SYNC", use_container_width=True):
+            st.session_state.sync_stop = True
+            st.warning("Stopping after current symbol...")
+
+    if st.session_state.sync_running:
+        fyers = get_fyers()
+        if not fyers:
+            st.error("Login required for sync.")
+            st.session_state.sync_running = False
+        else:
+            progress_overall = st.progress(0, text="Starting Bulk Sync...")
+            status_overall = st.empty()
+            
+            total = len(sync_symbols)
+            for i, sym in enumerate(sync_symbols):
+                if st.session_state.sync_stop:
+                    st.session_state.sync_running = False
+                    st.info("Sync stopped by user.")
+                    break
+                
+                progress_overall.progress((i + 1) / total, text=f"Syncing {i+1}/{total}: {sym}")
+                status_overall.caption(f"Current Target: {sym}")
+                
+                try:
+                    # fetch_ohlcv handles the internal DB sync since 1994 for Daily res
+                    fetch_ohlcv(fyers, sym, "D", date.today(), 100)
+                except Exception as e:
+                    st.warning(f"Failed to sync {sym}: {e}")
+                    time.sleep(1)
+            
+            st.session_state.sync_running = False
+            progress_overall.empty()
+            status_overall.empty()
+            st.success(f"🎉 Bulk Sync Complete for {sync_group}!")
+            st.rerun()
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # TAB 5: CUSTOM WATCHLIST
@@ -548,6 +708,7 @@ with tab_watchlist:
     st.caption(f"File: `{WATCHLIST_FILE}`")
 
     col_wl_l, col_wl_r = st.columns([3, 2])
+
 
     with col_wl_l:
         current = get_custom_watchlist_symbols()

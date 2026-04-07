@@ -199,6 +199,141 @@ def strategy_volume_spike_breakout(df: pd.DataFrame, params: dict = {}) -> Strat
     )
 
 
+def strategy_abc_long(df: pd.DataFrame, params: dict = {}) -> StrategyResult:
+    """
+    ABC Long:
+    - 50 SMA is rising (Trend check)
+    - Price at confluence of 50 SMA and Lower Bollinger Band (within proximity)
+    - Trigger: Green candle (Bullish)
+    """
+    name = "ABC Long"
+    proximity_pct = params.get("abc_proximity_pct", 1.0)
+
+    if len(df) < 52:
+        return StrategyResult(False, name, {"error": "Not enough data for SMA50"})
+
+    last = df.iloc[-1]
+    prev = df.iloc[-2]
+
+    # 1. Trend: SMA 50 must be rising
+    sma50_curr = last["sma_50"]
+    sma50_prev = prev["sma_50"]
+    is_rising = sma50_curr > sma50_prev
+
+    # 2. Confluence Check: Distance between SMA50 and BB Lower
+    bb_lower = last["bb_lower"]
+    dist_sma_bb = abs(sma50_curr - bb_lower) / sma50_curr * 100
+    
+    # 3. Price near the 'Confluence Zone'
+    # We check if the candle low is near the average of SMA and BB
+    zone_mid = (sma50_curr + bb_lower) / 2
+    dist_to_zone = abs(last["low"] - zone_mid) / zone_mid * 100
+    
+    # Logic: SMA and BB should be close (Confluence) AND Price should be near that zone
+    near_confluence = (dist_sma_bb <= 2.5) and (dist_to_zone <= proximity_pct)
+    
+    # 4. Trigger: Green candle
+    is_bullish = bool(last["is_green"])
+
+    matched = is_rising and near_confluence and is_bullish
+    return StrategyResult(
+        matched=matched,
+        strategy_name=name,
+        details={
+            "price": round(last["close"], 2),
+            "sma50": round(sma50_curr, 2),
+            "bb_low": round(bb_lower, 2),
+            "conf_dist": f"{round(dist_sma_bb, 2)}%",
+            "dist_to_zone": f"{round(dist_to_zone, 2)}%",
+            "is_rising": bool(is_rising),
+        },
+    )
+
+
+def strategy_abc_short(df: pd.DataFrame, params: dict = {}) -> StrategyResult:
+    """
+    ABC Short:
+    - 50 SMA is falling (Trend check)
+    - Price at confluence of 50 SMA and Upper Bollinger Band
+    - Trigger: Red candle (Bearish)
+    """
+    name = "ABC Short"
+    proximity_pct = params.get("abc_proximity_pct", 1.0)
+
+    if len(df) < 52:
+        return StrategyResult(False, name, {"error": "Not enough data for SMA50"})
+
+    last = df.iloc[-1]
+    prev = df.iloc[-2]
+
+    # 1. Trend: SMA 50 must be falling
+    sma50_curr = last["sma_50"]
+    sma50_prev = prev["sma_50"]
+    is_falling = sma50_curr < sma50_prev
+
+    # 2. Confluence Check: Distance between SMA50 and BB Upper
+    bb_upper = last["bb_upper"]
+    dist_sma_bb = abs(sma50_curr - bb_upper) / sma50_curr * 100
+    
+    # 3. Price near the 'Confluence Zone'
+    zone_mid = (sma50_curr + bb_upper) / 2
+    dist_to_zone = abs(last["high"] - zone_mid) / zone_mid * 100
+    
+    # Logic: SMA and BB should be close (Confluence) AND Price should be near that zone
+    near_confluence = (dist_sma_bb <= 2.5) and (dist_to_zone <= proximity_pct)
+    
+    # 4. Trigger: Red candle
+    is_bearish = bool(last["is_red"])
+
+    matched = is_falling and near_confluence and is_bearish
+    return StrategyResult(
+        matched=matched,
+        strategy_name=name,
+        details={
+            "price": round(last["close"], 2),
+            "sma50": round(sma50_curr, 2),
+            "bb_up": round(bb_upper, 2),
+            "conf_dist": f"{round(dist_sma_bb, 2)}%",
+            "dist_to_zone": f"{round(dist_to_zone, 2)}%",
+            "is_falling": is_falling,
+        },
+    )
+
+
+def strategy_ath_proximity(df: pd.DataFrame, params: dict = {}) -> StrategyResult:
+    """
+    All Time High (ATH) Proximity:
+    - Finds the highest 'high' in the entire provided history.
+    - Matches if current 'close' is within X% of that ATH.
+    """
+    name = "All Time High Proximity"
+    threshold_pct = params.get("ath_threshold_pct", 5.0)
+
+    if len(df) < 10:
+        return StrategyResult(False, name, {"error": "Not enough data"})
+
+    # Calculate ATH from full available history
+    ath_price = df["high"].max()
+    current_price = df.iloc[-1]["close"]
+    
+    if ath_price == 0:
+        return StrategyResult(False, name, {"error": "ATH is 0"})
+
+    distance_pct = ((ath_price - current_price) / ath_price) * 100
+    matched = distance_pct <= threshold_pct
+
+    return StrategyResult(
+        matched=matched,
+        strategy_name=name,
+        details={
+            "current": round(current_price, 2),
+            "ath_price": round(ath_price, 2),
+            "dist_pct": f"{round(distance_pct, 2)}%",
+            "threshold": f"{threshold_pct}%",
+        },
+    )
+
+
 # ─── Strategy Registry ───────────────────────────────────────────────────────
 
 STRATEGIES: dict[str, Callable] = {
@@ -207,6 +342,9 @@ STRATEGIES: dict[str, Callable] = {
     "50 SMA Support Bounce": strategy_sma50_support_bounce,
     "RSI Momentum": strategy_rsi_momentum,
     "Volume Spike Breakout": strategy_volume_spike_breakout,
+    "ABC Long": strategy_abc_long,
+    "ABC Short": strategy_abc_short,
+    "All Time High Proximity": strategy_ath_proximity,
 }
 
 STRATEGY_PARAMS: dict[str, dict] = {
@@ -215,6 +353,9 @@ STRATEGY_PARAMS: dict[str, dict] = {
     "50 SMA Support Bounce": {"proximity_pct": 2.0},
     "RSI Momentum": {"rsi_threshold": 60.0},
     "Volume Spike Breakout": {"vol_multiplier": 2.0},
+    "ABC Long": {"abc_proximity_pct": 1.0},
+    "ABC Short": {"abc_proximity_pct": 1.0},
+    "All Time High Proximity": {"ath_threshold_pct": 5.0},
 }
 
 STRATEGY_DESCRIPTIONS: dict[str, str] = {
@@ -223,6 +364,9 @@ STRATEGY_DESCRIPTIONS: dict[str, str] = {
     "50 SMA Support Bounce": "🔥 Trend Support: Price touched or neared the 50 SMA and bounced back with a green candle. Classic 'Buy the Dip' setup in an uptrend.",
     "RSI Momentum": "⚡ High Velocity: RSI is above your threshold (default 60) and heading higher. Best for catching stocks in a 'Runaway' phase.",
     "Volume Spike Breakout": "📊 Institutional Entry: Volume is at least 2x higher than the 20-day average. Combined with a green close, it signals major smart money activity.",
+    "ABC Long": "🅰️ Bullish Confluence: Green candle at the exact point where 50 SMA (rising) meets the Lower Bollinger Band.",
+    "ABC Short": "🅾️ Bearish Confluence: Red candle at the exact point where 50 SMA (falling) meets the Upper Bollinger Band.",
+    "All Time High Proximity": "🏔️ Multi-Year Peak: Detects stocks currently trading near their absolute historical high (since 1994). Essential for checking Blue-Sky breakouts.",
 }
 
 
