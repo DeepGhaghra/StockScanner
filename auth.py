@@ -186,7 +186,6 @@ def get_token_info() -> dict:
     }
 
 
-# ─── CLI Mode ───────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     token = get_access_token()
     if token:

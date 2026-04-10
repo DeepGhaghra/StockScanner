@@ -32,7 +32,8 @@ from auth import (
 from core.data_fetcher import fetch_ohlcv, get_fyers_client, clear_cache
 from core.indicators import add_all_indicators
 from core.scanner import run_scan
-from core.strategy_engine import STRATEGIES, STRATEGY_DESCRIPTIONS, STRATEGY_PARAMS
+from plotly.subplots import make_subplots
+from core.strategy_engine import STRATEGIES, STRATEGY_DESCRIPTIONS, STRATEGY_PARAMS, find_pivots
 from core.symbol_manager import (
     get_available_indices,
     get_symbols,
@@ -95,22 +96,107 @@ def render_metric_card(label: str, value, col):
     )
 
 
-def make_candlestick(candles: list[dict], symbol: str) -> go.Figure:
+def make_candlestick(candles: list[dict], symbol: str, matched_strats: str = "") -> go.Figure:
     df = pd.DataFrame(candles)
-    fig = go.Figure(data=[go.Candlestick(
+    df["datetime"] = pd.to_datetime(df["datetime"])
+    
+    # Indicators based on selection
+    show_rsi = "RSI Momentum" in matched_strats
+    show_bb = any(x in matched_strats for x in ["ABC", "50 SMA Support"])
+    show_dow = "Dow Trend" in matched_strats
+    
+    # Subplot configuration
+    if show_rsi:
+        fig = make_subplots(rows=2, cols=1, shared_xaxes=True, 
+                            vertical_spacing=0.08, row_heights=[0.7, 0.3])
+    else:
+        fig = go.Figure()
+
+    # Styling colors
+    bg_color = "#0f172a" 
+    grid_color = "rgba(148, 163, 184, 0.08)"
+    
+    # ─── MAIN CHART (ROW 1) ──────────────────────────────────────────────────
+    
+    # 1. Bollinger Bands
+    if show_bb and "bb_upper" in df.columns:
+        fig.add_trace(go.Scatter(
+            x=df["datetime"], y=df["bb_upper"],
+            line=dict(color="rgba(148, 163, 184, 0.4)", width=1),
+            hoverinfo="skip", showlegend=False
+        ), row=1 if show_rsi else None, col=1 if show_rsi else None)
+        fig.add_trace(go.Scatter(
+            x=df["datetime"], y=df["bb_lower"],
+            line=dict(color="rgba(148, 163, 184, 0.4)", width=1),
+            fill='tonexty', fillcolor="rgba(148, 163, 184, 0.03)",
+            hoverinfo="skip", showlegend=False
+        ), row=1 if show_rsi else None, col=1 if show_rsi else None)
+
+    # 2. SMA 50
+    if "sma_50" in df.columns:
+        fig.add_trace(go.Scatter(
+            x=df["datetime"], y=df["sma_50"],
+            line=dict(color="#f87171", width=1.2, dash="dot"),
+            name="SMA 50", opacity=0.8
+        ), row=1 if show_rsi else None, col=1 if show_rsi else None)
+
+    # 3. Dow Theory Zig-Zag
+    if show_dow:
+        peaks, troughs = find_pivots(df, strength=3)
+        if peaks:
+            px = [p["date"] for p in peaks]
+            py = [p["price"] for p in peaks]
+            fig.add_trace(go.Scatter(
+                x=px, y=py, mode="lines+markers",
+                line=dict(color="#60a5fa", width=1.5),
+                marker=dict(symbol="x-thin", size=7, line=dict(width=1)),
+                name="Dow Highs"
+            ), row=1 if show_rsi else None, col=1 if show_rsi else None)
+        if troughs:
+            tx = [t["date"] for t in troughs]
+            ty = [t["price"] for t in troughs]
+            fig.add_trace(go.Scatter(
+                x=tx, y=ty, mode="lines+markers",
+                line=dict(color="#fb7185", width=1.5),
+                marker=dict(symbol="x-thin", size=7, line=dict(width=1)),
+                name="Dow Lows"
+            ), row=1 if show_rsi else None, col=1 if show_rsi else None)
+
+    # 4. Candlesticks
+    fig.add_trace(go.Candlestick(
         x=df["datetime"], open=df["open"], high=df["high"],
         low=df["low"], close=df["close"],
-        increasing_line_color="#34d399", decreasing_line_color="#f87171",
-        increasing_fillcolor="#34d399", decreasing_fillcolor="#f87171",
+        increasing_line_color="#10b981", decreasing_line_color="#ef4444",
+        increasing_fillcolor="#10b981", decreasing_fillcolor="#ef4444",
         name=symbol,
-    )])
+    ), row=1 if show_rsi else None, col=1 if show_rsi else None)
+
+    # ─── RSI SUBPLOT (ROW 2) ─────────────────────────────────────────────────
+    if show_rsi and "rsi_14" in df.columns:
+        fig.add_trace(go.Scatter(
+            x=df["datetime"], y=df["rsi_14"],
+            line=dict(color="#818cf8", width=2),
+            name="RSI"
+        ), row=2, col=1)
+        # RSI 70/30/50 Lines
+        for val, color in [(70, "#ef4444"), (30, "#10b981"), (50, "rgba(148, 163, 184, 0.3)")]:
+            fig.add_hline(y=val, line=dict(color=color, width=1, dash="dash"), row=2, col=1)
+
+    # Layout Tuning
     fig.update_layout(
-        title=f"{symbol} — Last 10 Candles", template="plotly_dark",
-        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(15,15,35,0.6)",
-        height=300, margin=dict(l=10, r=10, t=40, b=10),
+        template="plotly_dark",
+        paper_bgcolor=bg_color,
+        plot_bgcolor=bg_color,
+        height=550 if show_rsi else 420,
+        margin=dict(l=10, r=10, t=40, b=10),
         xaxis_rangeslider_visible=False,
-        font=dict(family="Inter", color="#94a3b8"),
+        showlegend=False,
+        font=dict(family="Inter", size=11, color="#94a3b8"),
+        title=dict(text=f"<b>{symbol}</b> Analysis", x=0.01, font=dict(size=16, color="#f8fafc"))
     )
+    fig.update_yaxes(gridcolor=grid_color, zeroline=False, tickfont=dict(size=10))
+    fig.update_xaxes(gridcolor=grid_color, zeroline=False, tickfont=dict(size=10))
+    
     return fig
 
 
@@ -263,7 +349,7 @@ with tab_scanner:
         symbols = cached_get_symbols(stock_group)
 
     with c4:
-        selected_strategies = st.multiselect("🎯 Setup", options=list(STRATEGIES.keys()), default=["Higher High"])
+        selected_strategies = st.multiselect("🎯 Setup", options=list(STRATEGIES.keys()), default=["Dow Trend (HH/HL)"])
         
         # Guide Preview (Small text below selection)
         if selected_strategies:
@@ -271,8 +357,13 @@ with tab_scanner:
             st.caption(f"ℹ️ {STRATEGY_DESCRIPTIONS.get(last_sel, '').split(':')[0]}")
 
         strategy_params = {}
+        strategy_logic = "OR"
         if selected_strategies:
             with st.popover("⚙️ Params & Guide"):
+                st.markdown("### 🎯 Global Match Mode")
+                strategy_logic = st.radio("Logic", ["Any (OR)", "All (AND)"], index=0, horizontal=True, help="Any: Shows stocks matching at least one setup. All: Shows only stocks matching ALL selected setups.")
+                strategy_logic = "AND" if "All" in strategy_logic else "OR"
+                st.divider()
                 st.markdown("### 📚 Setup Guide")
                 for s in selected_strategies:
                     st.info(f"**{s}**: {STRATEGY_DESCRIPTIONS.get(s, '')}")
@@ -290,9 +381,9 @@ with tab_scanner:
                     if "vol_multiplier" in defaults: p["vol_multiplier"] = pc[1].number_input("VolX", 1.0, 5.0, float(defaults["vol_multiplier"]), 0.5, key=f"p_{s}_vl")
                     if "abc_proximity_pct" in defaults: p["abc_proximity_pct"] = pc[0].number_input("Prox%", 0.1, 3.0, float(defaults["abc_proximity_pct"]), 0.1, key=f"p_{s}_abc")
                     if "ath_threshold_pct" in defaults: p["ath_threshold_pct"] = pc[1].number_input("ATH%", 0.1, 15.0, float(defaults["ath_threshold_pct"]), 0.5, key=f"p_{s}_ath")
+                    if "pivot_strength" in defaults: p["pivot_strength"] = pc[0].number_input("Pivot Strength", 2, 20, int(defaults["pivot_strength"]), 1, key=f"p_{s}_piv")
                     strategy_params[s] = p
         
-        strategy_logic = "OR" # Compact logic
 
     with c5:
         st.markdown("<div style='margin-top: 24px;'></div>", unsafe_allow_html=True)
@@ -352,12 +443,30 @@ with tab_scanner:
         total_scanned = meta.get("total_scanned", 0)
         elapsed = meta.get("elapsed", 0)
         tf_label = {"1":"1Min","5":"5Min","15":"15Min","30":"30Min","60":"1Hr","D":"Daily","W":"Weekly"}.get(meta.get("resolution","D"),"Daily")
+        
+        # Self-healing for stale session results
+        if 'Sector' not in results.columns:
+            results['Sector'] = 'Others'
 
         c1, c2, c3, c4 = st.columns(4)
         render_metric_card("Stocks Scanned", total_scanned, c1)
         render_metric_card("Matches Found", matched_count, c2)
         render_metric_card("Time Taken", f"{elapsed:.1f}s", c3)
         render_metric_card("Scan Date", str(meta.get("scan_date", "")), c4)
+
+        # ── Sectoral Insights ──
+        if not results.empty and 'Sector' in results.columns:
+            sector_counts = results['Sector'].value_counts()
+            blasts = sector_counts[(sector_counts > 1) & (sector_counts.index != "Others")]
+            
+            if not blasts.empty:
+                blast_list = [f"{name} ({count})" for name, count in blasts.items()]
+                st.markdown(f"""
+                <div style="background:rgba(99,102,241,0.1); border-left:4px solid #6366f1; padding:12px 20px; border-radius:8px; margin:1rem 0;">
+                    <div style="color:#6366f1; font-weight:700; font-size:1.1rem; margin-bottom:4px;">🚀 Sector Blast Detected!</div>
+                    <div style="color:#475569; font-size:0.95rem;">Collective institutional move suspected in: <b>{", ".join(blast_list)}</b></div>
+                </div>
+                """, unsafe_allow_html=True)
 
         st.markdown(
             f"<div style='margin:1rem 0;color:#64748b;font-size:0.85rem;'>"
@@ -385,16 +494,20 @@ with tab_scanner:
                         tv_sym = row['Name'].split(':')[-1].replace('-EQ','')
                         tv_url = f"https://in.tradingview.com/chart/?symbol=NSE:{tv_sym}&interval={tv_res}"
                         tags = "".join([f'<span class="strategy-tag">{s.strip()}</span>' for s in row['Strategies Matched'].split(",")])
+                        sector_badge = f'<span style="font-size:0.7rem; background:#f1f5f9; color:#64748b; padding:2px 6px; border-radius:4px; font-weight:600;">{row["Sector"]}</span>'
                         
                         with cols[j]:
                             st.markdown(f"""
                             <div class="result-card" style="min-height:230px; display:flex; flex-direction:column; justify-content:space-between;">
                                 <div>
                                     <div style="display:flex; justify-content:space-between; align-items:flex-start;">
-                                        <div style="font-size:1.1rem; font-weight:800; color:#0f172a; font-family:'Outfit';">{tv_sym}</div>
+                                        <div>
+                                            <div style="font-size:1.1rem; font-weight:800; color:#0f172a; font-family:\'Outfit\';">{tv_sym}</div>
+                                            {sector_badge}
+                                        </div>
                                         <span class="buy-badge">{row['Signal']}</span>
                                     </div>
-                                    <div style="font-size:1.4rem; font-weight:700; color:#6366f1; margin:8px 0; font-family:'Outfit';">₹{row['Close']:.2f}</div>
+                                    <div style="font-size:1.4rem; font-weight:700; color:#6366f1; margin:8px 0; font-family:\'Outfit\';">₹{row['Close']:.2f}</div>
                                     <div style="display:flex; flex-wrap:wrap; gap:4px; margin-bottom:10px;">{tags}</div>
                                 </div>
                                 <div style="border-top:1px solid #f1f5f9; padding-top:10px;">
@@ -442,7 +555,7 @@ with tab_details:
                     st.markdown(f"### {row['Name']} &nbsp; [🔗 TradingView]({tv_url})")
                     candles = row.get("_df", [])
                     if candles:
-                        fig = make_candlestick(candles, row["Name"])
+                        fig = make_candlestick(candles, row["Name"], row["Strategies Matched"])
                         st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
                 with col_b:
                     st.markdown("**📊 Indicator Snapshot**")
@@ -460,7 +573,8 @@ with tab_details:
                     st.markdown("**🎯 Condition Breakdown**")
                     for strategy_name, d in details.items():
                         st.markdown(f"*{strategy_name}*")
-                        detail_df = pd.DataFrame([{"Parameter": k, "Value": v} for k, v in d.items()])
+                        # FIX: string conversion to prevent Arrow mixed-type errors
+                        detail_df = pd.DataFrame([{"Parameter": str(k), "Value": str(v)} for k, v in d.items()])
                         st.dataframe(detail_df, use_container_width=True, hide_index=True, height=min(200, 50 + len(detail_df)*35))
 
                 candles = row.get("_df", [])

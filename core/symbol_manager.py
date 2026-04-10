@@ -263,22 +263,21 @@ def _fetch_fyers_master(url: str, exchange_prefix: str) -> list[str]:
             
             # Column mapping from inspection:
             # 9: Standard Fyers Symbol (e.g., NSE:RELIANCE-EQ)
-            # 10: Instrument Type (10 = Equity)
+            # 10: Instrument Type (10 = Equity on NSE, 12 on BSE CM)
             raw_symbol = row[9].strip()
-            inst_type = row[10].strip()
+            # inst_type = row[10].strip() # No longer strictly needed if we filter by suffix
             
-            # Type 10 = Equity (Stocks)
-            if inst_type == "10":
-                # Fyers already provides it with prefix like NSE:SYMBOL-EQ
-                # We normalize it for our internal storage
-                if ":" in raw_symbol:
-                    # e.g. NSE:RELIANCE-EQ (This is perfect)
+            # Filter for Equity Stocks: Regular, T2T, and common BSE groups/SME
+            # This handles both NSE and BSE correctly and excludes Debt, Bonds, MF, etc.
+            if ":" in raw_symbol:
+                equity_suffixes = ["-EQ", "-BE", "-A", "-B", "-X", "-XT", "-T", "-Z", "-P", "-SM", "-ST", "-M", "-MT"]
+                if any(raw_symbol.endswith(sfx) for sfx in equity_suffixes):
                     fyers_symbols.append(raw_symbol)
-                else:
-                    # In case prefix is missing (safety)
-                    clean_sym = raw_symbol
-                    if not clean_sym.endswith("-EQ"):
-                        clean_sym = f"{clean_sym}-EQ"
+            else:
+                # In case prefix is missing (safety)
+                clean_sym = raw_symbol
+                equity_suffixes = ["-EQ", "-BE", "-A", "-B", "-X", "-XT", "-T", "-Z", "-P", "-SM", "-ST", "-M", "-MT"]
+                if any(clean_sym.endswith(sfx) for sfx in equity_suffixes):
                     fyers_symbols.append(f"{exchange_prefix}:{clean_sym}")
         
         return sorted(list(set(fyers_symbols)))
@@ -405,12 +404,101 @@ def get_cache_status() -> list[dict]:
     return rows
 
 
+# ─── Sectoral Intelligence ───────────────────────────────────────────────────
+
+SECTOR_INDICES = [
+    "Bank Nifty", "Nifty IT", "Nifty Pharma", "Nifty Auto", 
+    "Nifty FMCG", "Nifty Metal", "Nifty Realty", "Nifty Energy", 
+    "Nifty Healthcare", "Nifty Infrastructure", "Nifty India Defence",
+    "Nifty PSU Bank", "Nifty Private Bank", "Fin Nifty"
+]
+
+INDUSTRY_MASTER_URL = "https://archives.nseindia.com/content/indices/ind_nifty500list.csv"
+
+def _fetch_industry_master() -> dict[str, str]:
+    """
+    Fetch Nifty 500 list and extract {Symbol: Industry} mapping.
+    """
+    cache_name = "industry_master"
+    cache_path = os.path.join(CACHE_DIR, f"{cache_name}.json")
+    
+    # Try valid cache first (TTL 30 days for industry)
+    if os.path.exists(cache_path):
+        meta = _load_meta()
+        if cache_name in meta:
+            fetched_at = datetime.fromisoformat(meta[cache_name]["fetched_at"])
+            if datetime.now() < fetched_at + timedelta(days=30):
+                with open(cache_path) as f:
+                    return json.load(f).get("mapping", {})
+
+    logger.info("[SymbolManager] Fetching Nifty 500 Industry Master from NSE...")
+    df = _fetch_nse_csv(INDUSTRY_MASTER_URL)
+    if df is not None:
+        mapping = {}
+        for _, row in df.iterrows():
+            symbol = str(row.get('Symbol', '')).strip()
+            industry = str(row.get('Industry', '')).strip()
+            if symbol and industry:
+                fyers_sym = f"NSE:{symbol}-EQ"
+                mapping[fyers_sym] = industry
+        
+        # Save to cache
+        _ensure_cache_dir()
+        with open(cache_path, "w") as f:
+            json.dump({"fetched_at": datetime.now().isoformat(), "mapping": mapping}, f, indent=2)
+        
+        meta = _load_meta()
+        meta[cache_name] = {
+            "fetched_at": datetime.now().isoformat(),
+            "expires_at": (datetime.now() + timedelta(days=30)).isoformat(),
+        }
+        _save_meta(meta)
+        return mapping
+        
+    return {}
+
+def get_sector_map() -> dict[str, str]:
+    """
+    Build a map of {Symbol: SectorName} automatically.
+    1. Primary: Detailed Screener-level Industrials from SQLite Database.
+    2. Fallback: Nifty 500 Industry Master.
+    3. Specific groupings from Nifty Sectoral Indices (Bank, IT, etc.)
+    """
+    # 1. Load the deep Screener map (1800+ stocks) from DB
+    from core.database import StockDatabase
+    try:
+        db = StockDatabase()
+        sector_map = db.get_all_sectors()
+    except Exception as e:
+        logger.warning(f"[SymbolManager] Failed to load sectors from DB: {e}")
+        sector_map = {}
+
+    # 2. Fallback/Supplement with Nifty 500 Industry Master
+    master = _fetch_industry_master()
+    for k, v in master.items():
+        if k not in sector_map:
+            sector_map[k] = v
+    
+    # 3. Specific groupings from official indices (Bank Nifty, IT, etc.)
+    for index in SECTOR_INDICES:
+        symbols = get_symbols(index)
+        clean_name = index.replace("Nifty ", "").replace(" Index", "")
+        for s in symbols:
+            sector_map[s] = clean_name
+            
+    return sector_map
+
+
 def get_custom_watchlist_symbols() -> list[str]:
     """Load from custom watchlist CSV"""
     path = os.path.join(BASE_DIR, "data", "custom_watchlist.csv")
     if not os.path.exists(path):
         return []
-    df = pd.read_csv(path)
-    if "symbol" not in df.columns:
+    try:
+        df = pd.read_csv(path)
+        if "symbol" not in df.columns:
+            return []
+        return df["symbol"].dropna().str.strip().tolist()
+    except Exception as e:
+        logger.error(f"[SymbolManager] Error loading custom watchlist: {e}")
         return []
-    return df["symbol"].dropna().str.strip().tolist()

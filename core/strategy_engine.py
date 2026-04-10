@@ -21,31 +21,80 @@ class StrategyResult:
 
 # ─── Individual Strategies ───────────────────────────────────────────────────
 
-def strategy_higher_high(df: pd.DataFrame, params: dict = {}) -> StrategyResult:
+def find_pivots(df: pd.DataFrame, strength: int = 5):
     """
-    Higher High Strategy:
-    - Current candle close > Previous candle high
-    - Current candle is green
+    Find major swing highs and swing lows (Pivot Points).
+    A high is a pivot high if it is higher than 'strength' candles before and after.
     """
-    name = "Higher High"
-    if len(df) < 2:
-        return StrategyResult(False, name, {"error": "Not enough data"})
+    highs = []
+    lows = []
+    
+    for i in range(strength, len(df) - strength):
+        # Pivot High
+        is_pivot_high = True
+        for j in range(1, strength + 1):
+            if df.iloc[i]["high"] <= df.iloc[i-j]["high"] or df.iloc[i]["high"] <= df.iloc[i+j]["high"]:
+                is_pivot_high = False
+                break
+        if is_pivot_high:
+            highs.append({"index": i, "price": df.iloc[i]["high"], "date": df.iloc[i]["datetime"]})
 
-    last = df.iloc[-1]
-    prev = df.iloc[-2]
+        # Pivot Low
+        is_pivot_low = True
+        for j in range(1, strength + 1):
+            if df.iloc[i]["low"] >= df.iloc[i-j]["low"] or df.iloc[i]["low"] >= df.iloc[i+j]["low"]:
+                is_pivot_low = False
+                break
+        if is_pivot_low:
+            lows.append({"index": i, "price": df.iloc[i]["low"], "date": df.iloc[i]["datetime"]})
+            
+    return highs, lows
 
-    close_above_prev_high = last["close"] > prev["high"]
-    is_green = last["is_green"]
 
-    matched = close_above_prev_high and is_green
+def strategy_dow_trend(df: pd.DataFrame, params: dict = {}) -> StrategyResult:
+    """
+    Dow Theory Structural Trend:
+    - Higher High (HH): Latest major peak > previous major peak.
+    - Higher Low (HL): Latest major trough > previous major trough.
+    - Confirmation: Price is currently trending upwards.
+    """
+    name = "Dow Trend (HH/HL)"
+    strength = params.get("pivot_strength", 5)
+    
+    if len(df) < (strength * 4):
+        return StrategyResult(False, name, {"error": "Not enough data for pivots"})
+
+    peaks, troughs = find_pivots(df, strength=strength)
+    
+    if len(peaks) < 2 or len(troughs) < 2:
+        return StrategyResult(False, name, {"error": "Structure not fully formed"})
+
+    # Latest and Previous PIVOTS
+    last_peak = peaks[-1]
+    prev_peak = peaks[-2]
+    last_trough = troughs[-1]
+    prev_trough = troughs[-2]
+
+    is_hh = last_peak["price"] > prev_peak["price"]
+    is_hl = last_trough["price"] > prev_trough["price"]
+    
+    # Confirmation: We are in an active uptrend structure
+    # Most basic: Current close is above the latest trough
+    last_close = df.iloc[-1]["close"]
+    above_structure = last_close > last_trough["price"]
+
+    matched = is_hh and is_hl and above_structure
+    
     return StrategyResult(
         matched=matched,
         strategy_name=name,
         details={
-            "close": round(last["close"], 2),
-            "prev_high": round(prev["high"], 2),
-            "is_green": bool(is_green),
-            "close_above_prev_high": close_above_prev_high,
+            "structure": "HH + HL" if is_hh and is_hl else "Broken",
+            "last_hh": round(last_peak["price"], 2),
+            "prev_peak": round(prev_peak["price"], 2),
+            "last_hl": round(last_trough["price"], 2),
+            "prev_trough": round(prev_trough["price"], 2),
+            "strength": strength,
         },
     )
 
@@ -204,12 +253,12 @@ def strategy_abc_long(df: pd.DataFrame, params: dict = {}) -> StrategyResult:
     ABC Long:
     - 50 SMA is rising (Trend check)
     - Price at confluence of 50 SMA and Lower Bollinger Band (within proximity)
-    - Trigger: Green candle (Bullish)
+    - Trigger: Green candle (Bullish) after a touch (Today or Yesterday)
     """
     name = "ABC Long"
     proximity_pct = params.get("abc_proximity_pct", 1.0)
 
-    if len(df) < 52:
+    if len(df) < 53:
         return StrategyResult(False, name, {"error": "Not enough data for SMA50"})
 
     last = df.iloc[-1]
@@ -220,31 +269,36 @@ def strategy_abc_long(df: pd.DataFrame, params: dict = {}) -> StrategyResult:
     sma50_prev = prev["sma_50"]
     is_rising = sma50_curr > sma50_prev
 
-    # 2. Confluence Check: Distance between SMA50 and BB Lower
-    bb_lower = last["bb_lower"]
-    dist_sma_bb = abs(sma50_curr - bb_lower) / sma50_curr * 100
+    # 2. Confluence Zone Logic (Function to reuse for last and prev)
+    def check_near_confluence(candle, proximity):
+        sma = candle["sma_50"]
+        bb_low = candle["bb_lower"]
+        if np.isnan(sma) or np.isnan(bb_low): return False
+        
+        # Confluence: SMA and BB Lower are close
+        dist_sma_bb = abs(sma - bb_low) / sma * 100
+        # Price: Low of candle is near the zone
+        zone_mid = (sma + bb_low) / 2
+        dist_to_zone = abs(candle["low"] - zone_mid) / zone_mid * 100
+        
+        return (dist_sma_bb <= 2.5) and (dist_to_zone <= proximity)
+
+    # 3. Check for Confluence (Today OR Yesterday)
+    near_conf_today = check_near_confluence(last, proximity_pct)
+    near_conf_yesterday = check_near_confluence(prev, proximity_pct)
     
-    # 3. Price near the 'Confluence Zone'
-    # We check if the candle low is near the average of SMA and BB
-    zone_mid = (sma50_curr + bb_lower) / 2
-    dist_to_zone = abs(last["low"] - zone_mid) / zone_mid * 100
-    
-    # Logic: SMA and BB should be close (Confluence) AND Price should be near that zone
-    near_confluence = (dist_sma_bb <= 2.5) and (dist_to_zone <= proximity_pct)
-    
-    # 4. Trigger: Green candle
+    # 4. Trigger: Green candle (Bullish confirmation)
     is_bullish = bool(last["is_green"])
 
-    matched = is_rising and near_confluence and is_bullish
+    matched = is_rising and (near_conf_today or near_conf_yesterday) and is_bullish
     return StrategyResult(
         matched=matched,
         strategy_name=name,
         details={
             "price": round(last["close"], 2),
             "sma50": round(sma50_curr, 2),
-            "bb_low": round(bb_lower, 2),
-            "conf_dist": f"{round(dist_sma_bb, 2)}%",
-            "dist_to_zone": f"{round(dist_to_zone, 2)}%",
+            "conf_today": near_conf_today,
+            "conf_yest": near_conf_yesterday,
             "is_rising": bool(is_rising),
         },
     )
@@ -255,12 +309,12 @@ def strategy_abc_short(df: pd.DataFrame, params: dict = {}) -> StrategyResult:
     ABC Short:
     - 50 SMA is falling (Trend check)
     - Price at confluence of 50 SMA and Upper Bollinger Band
-    - Trigger: Red candle (Bearish)
+    - Trigger: Red candle (Bearish) after a touch (Today or Yesterday)
     """
     name = "ABC Short"
     proximity_pct = params.get("abc_proximity_pct", 1.0)
 
-    if len(df) < 52:
+    if len(df) < 53:
         return StrategyResult(False, name, {"error": "Not enough data for SMA50"})
 
     last = df.iloc[-1]
@@ -271,30 +325,36 @@ def strategy_abc_short(df: pd.DataFrame, params: dict = {}) -> StrategyResult:
     sma50_prev = prev["sma_50"]
     is_falling = sma50_curr < sma50_prev
 
-    # 2. Confluence Check: Distance between SMA50 and BB Upper
-    bb_upper = last["bb_upper"]
-    dist_sma_bb = abs(sma50_curr - bb_upper) / sma50_curr * 100
+    # 2. Confluence Zone Logic (Function to reuse for last and prev)
+    def check_near_confluence_short(candle, proximity):
+        sma = candle["sma_50"]
+        bb_up = candle["bb_upper"]
+        if np.isnan(sma) or np.isnan(bb_up): return False
+        
+        # Confluence: SMA and BB Upper are close
+        dist_sma_bb = abs(sma - bb_up) / sma * 100
+        # Price: High of candle is near the zone
+        zone_mid = (sma + bb_up) / 2
+        dist_to_zone = abs(candle["high"] - zone_mid) / zone_mid * 100
+        
+        return (dist_sma_bb <= 2.5) and (dist_to_zone <= proximity)
+
+    # 3. Check for Confluence (Today OR Yesterday)
+    near_conf_today = check_near_confluence_short(last, proximity_pct)
+    near_conf_yesterday = check_near_confluence_short(prev, proximity_pct)
     
-    # 3. Price near the 'Confluence Zone'
-    zone_mid = (sma50_curr + bb_upper) / 2
-    dist_to_zone = abs(last["high"] - zone_mid) / zone_mid * 100
-    
-    # Logic: SMA and BB should be close (Confluence) AND Price should be near that zone
-    near_confluence = (dist_sma_bb <= 2.5) and (dist_to_zone <= proximity_pct)
-    
-    # 4. Trigger: Red candle
+    # 4. Trigger: Red candle (Bearish confirmation)
     is_bearish = bool(last["is_red"])
 
-    matched = is_falling and near_confluence and is_bearish
+    matched = is_falling and (near_conf_today or near_conf_yesterday) and is_bearish
     return StrategyResult(
         matched=matched,
         strategy_name=name,
         details={
             "price": round(last["close"], 2),
             "sma50": round(sma50_curr, 2),
-            "bb_up": round(bb_upper, 2),
-            "conf_dist": f"{round(dist_sma_bb, 2)}%",
-            "dist_to_zone": f"{round(dist_to_zone, 2)}%",
+            "conf_today": near_conf_today,
+            "conf_yest": near_conf_yesterday,
             "is_falling": is_falling,
         },
     )
@@ -337,7 +397,7 @@ def strategy_ath_proximity(df: pd.DataFrame, params: dict = {}) -> StrategyResul
 # ─── Strategy Registry ───────────────────────────────────────────────────────
 
 STRATEGIES: dict[str, Callable] = {
-    "Higher High": strategy_higher_high,
+    "Dow Trend (HH/HL)": strategy_dow_trend,
     "Strong Bullish Candle": strategy_strong_bullish_candle,
     "50 SMA Support Bounce": strategy_sma50_support_bounce,
     "RSI Momentum": strategy_rsi_momentum,
@@ -348,7 +408,7 @@ STRATEGIES: dict[str, Callable] = {
 }
 
 STRATEGY_PARAMS: dict[str, dict] = {
-    "Higher High": {},
+    "Dow Trend (HH/HL)": {"pivot_strength": 5},
     "Strong Bullish Candle": {"min_body_pct": 60.0},
     "50 SMA Support Bounce": {"proximity_pct": 2.0},
     "RSI Momentum": {"rsi_threshold": 60.0},
@@ -359,7 +419,7 @@ STRATEGY_PARAMS: dict[str, dict] = {
 }
 
 STRATEGY_DESCRIPTIONS: dict[str, str] = {
-    "Higher High": "🚀 Bullish Continuation: Current candle closed above the previous high. Signals that buyers are aggressively pushing to new territory.",
+    "Dow Trend (HH/HL)": "📈 Structural Uptrend: Detects a sequence of Higher Highs and Higher Lows according to Dow Theory. Confirms the stock is in a healthy structural bull trend.",
     "Strong Bullish Candle": "💪 Buying Conviction: Large body with tiny wicks. Indicates that the stock opened low and closed near its high with zero selling pressure.",
     "50 SMA Support Bounce": "🔥 Trend Support: Price touched or neared the 50 SMA and bounced back with a green candle. Classic 'Buy the Dip' setup in an uptrend.",
     "RSI Momentum": "⚡ High Velocity: RSI is above your threshold (default 60) and heading higher. Best for catching stocks in a 'Runaway' phase.",

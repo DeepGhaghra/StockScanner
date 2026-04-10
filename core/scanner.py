@@ -11,6 +11,7 @@ from fyers_apiv3 import fyersModel
 from core.data_fetcher import fetch_ohlcv, clear_cache
 from core.indicators import add_all_indicators
 from core.strategy_engine import run_strategies, STRATEGIES
+from core.symbol_manager import get_sector_map
 from utils.helpers import symbol_to_display_name
 
 
@@ -38,11 +39,13 @@ def run_scan(
         progress_callback: Optional fn(current, total, symbol) for progress reporting
 
     Returns:
-        DataFrame with columns: Symbol, Name, Matched Strategies, Close, SMA50, RSI,
-                                 Volume, Vol Ratio, Signal, Details
+        DataFrame with results
     """
     results = []
     total = len(symbols)
+    
+    # Pre-fetch sector map once
+    sector_map = get_sector_map()
 
     for i, symbol in enumerate(symbols):
         display_name = symbol_to_display_name(symbol)
@@ -71,6 +74,7 @@ def run_scan(
 
         # 5. Build result row
         last = df.iloc[-1]
+        sector = sector_map.get(symbol, "Others")
 
         matched_names = [r.strategy_name for r in strategy_results if r.matched]
         details = {}
@@ -81,6 +85,7 @@ def run_scan(
         row = {
             "Symbol": symbol,
             "Name": display_name,
+            "Sector": sector,
             "Strategies Matched": ", ".join(matched_names),
             "Close": round(float(last["close"]), 2),
             "Open": round(float(last["open"]), 2),
@@ -93,7 +98,7 @@ def run_scan(
             "Candle Date": last["datetime"].strftime("%d-%m-%Y %H:%M:%S"),
             "Signal": "BUY",
             "_details": details,
-            "_df": df.tail(10).to_dict("records"),  # last 10 candles for detail view
+            "_df": df.tail(60).to_dict("records"),  # last 60 candles for detail view
         }
         results.append(row)
 
@@ -111,6 +116,5 @@ def get_indicator_snapshot(symbol_row: dict) -> pd.DataFrame:
     for strategy, d in details.items():
         if isinstance(d, dict):
             for k, v in d.items():
-                # Force strictly string to avoid pyarrow mix-type errors
                 rows.append({"Strategy": str(strategy), "Parameter": str(k), "Value": str(v)})
     return pd.DataFrame(rows)

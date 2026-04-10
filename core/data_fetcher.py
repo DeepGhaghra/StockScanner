@@ -112,14 +112,16 @@ def fetch_ohlcv(
     # But loading all Daily data into memory is fine (~7000 rows for 30 years).
     df = db.get_history(symbol, api_res)
     
-    if df.empty and api_res != "D":
-        # Fallback for non-daily which we don't sync fully yet
-        df = fetch_ohlcv_direct(fyers, symbol, api_res, scan_date, lookback_days, retry_count)
-        if df is not None:
-             db.save_candles(symbol, api_res, df)
-             return df
+    # If no valid token, try Auto-Login
+    if df is None or df.empty:
+        if api_res != "D":
+            # Fallback for non-daily which we don't sync fully yet
+            df = fetch_ohlcv_direct(fyers, symbol, api_res, scan_date, lookback_days, retry_count)
+            if df is not None and not df.empty:
+                 db.save_candles(symbol, api_res, df)
+                 return df
     
-    return df if not df.empty else None
+    return df if (df is not None and not df.empty) else None
 
 
 def _fetch_range_direct(fyers, symbol, resolution, start_date, end_date):

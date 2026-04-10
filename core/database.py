@@ -43,6 +43,16 @@ class StockDatabase:
                 )
             """)
 
+            # New: Sectors table for industry classification
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS sectors (
+                    symbol TEXT PRIMARY KEY,
+                    industry TEXT,
+                    source TEXT,
+                    updated_at TIMESTAMP
+                )
+            """)
+
     def save_candles(self, symbol: str, resolution: str, df: pd.DataFrame):
         """Upsert candles into the database"""
         if df.empty:
@@ -90,9 +100,38 @@ class StockDatabase:
                 return pd.to_datetime(res[0])
             return None
 
+    def save_sectors(self, mapping: dict[str, str], source: str = "Screener"):
+        """Save sectoral mapping into database"""
+        if not mapping:
+            return
+            
+        data = []
+        now = datetime.now().isoformat()
+        for sym, ind in mapping.items():
+            data.append((sym, ind, source, now))
+            
+        with self._get_connection() as conn:
+            # Use 'REPLACE' to update existing symbol mappings
+            conn.executemany("""
+                REPLACE INTO sectors (symbol, industry, source, updated_at)
+                VALUES (?, ?, ?, ?)
+            """, data)
+
+    def get_all_sectors(self) -> dict[str, str]:
+        """Retrieve all sector mappings from DB"""
+        query = "SELECT symbol, industry FROM sectors"
+        with self._get_connection() as conn:
+            rows = conn.execute(query).fetchall()
+            return {r[0]: r[1] for r in rows}
+
     def get_db_stats(self):
         """Get summary of stored data"""
         with self._get_connection() as conn:
             count = conn.execute("SELECT COUNT(*) FROM ohlcv").fetchone()[0]
             symbols = conn.execute("SELECT COUNT(DISTINCT symbol) FROM ohlcv").fetchone()[0]
-            return {"total_rows": count, "total_symbols": symbols}
+            sector_count = conn.execute("SELECT COUNT(*) FROM sectors").fetchone()[0]
+            return {
+                "total_rows": count, 
+                "total_symbols": symbols,
+                "total_sectors": sector_count
+            }
