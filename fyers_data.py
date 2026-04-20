@@ -4,6 +4,7 @@ import pandas as pd
 from fyers_apiv3 import fyersModel
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 load_dotenv()
 
@@ -163,5 +164,12 @@ def update_stock_data(symbol, fyers=None, retry_count=3):
 
 if __name__ == "__main__":
     my_stocks = ["RELIANCE", "TCS", "SBIN", "RELINFRA", "SCHNEIDER"]
-    for s in my_stocks:
-        update_stock_data(s)
+    
+    with ThreadPoolExecutor(max_workers=5) as executor:
+        futures = {executor.submit(update_stock_data, s): s for s in my_stocks}
+        for future in as_completed(futures):
+            s = futures[future]
+            try:
+                future.result()
+            except Exception as e:
+                print(f"Error for {s}: {e}")

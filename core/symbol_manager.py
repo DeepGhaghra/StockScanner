@@ -21,55 +21,85 @@ BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CACHE_DIR = os.path.join(BASE_DIR, "data", "cache")
 META_FILE = os.path.join(CACHE_DIR, "index_meta.json")
 
-CACHE_TTL_DAYS = 7
+CACHE_TTL_DAYS = 90
 
 # ─── NSE Index CSV Sources ────────────────────────────────────────────────────
 # All URLs from NSE India public archives — no authentication required
 NSE_BASE = "https://archives.nseindia.com/content/indices"
 
 INDEX_SOURCES: dict[str, str] = {
-    # Broad Market
+    # ─── Broad Market ──────────────────────────────────────────────────────────
     "Nifty 50":                f"{NSE_BASE}/ind_nifty50list.csv",
     "Nifty Next 50":           f"{NSE_BASE}/ind_niftynext50list.csv",
     "Nifty 100":               f"{NSE_BASE}/ind_nifty100list.csv",
     "Nifty 200":               f"{NSE_BASE}/ind_nifty200list.csv",
     "Nifty 500":               f"{NSE_BASE}/ind_nifty500list.csv",
-    # Midcap / Smallcap
-    "Nifty Midcap Select":     f"{NSE_BASE}/ind_niftymidcapselect.csv",      # falls back to static
     "Nifty Midcap 50":         f"{NSE_BASE}/ind_niftymidcap50list.csv",
     "Nifty Midcap 100":        f"{NSE_BASE}/ind_niftymidcap100list.csv",
     "Nifty Midcap 150":        f"{NSE_BASE}/ind_niftymidcap150list.csv",
     "Nifty Smallcap 50":       f"{NSE_BASE}/ind_niftysmallcap50list.csv",
     "Nifty Smallcap 100":      f"{NSE_BASE}/ind_niftysmallcap100list.csv",
     "Nifty Smallcap 250":      f"{NSE_BASE}/ind_niftysmallcap250list.csv",
+    "Nifty Microcap 250":      f"{NSE_BASE}/ind_niftymicrocap250_list.csv",
     "Nifty MidSmallcap 400":   f"{NSE_BASE}/ind_niftymidsmallcap400list.csv",
-    # Sectoral — Banking
+    "Nifty Total Market":      f"{NSE_BASE}/ind_niftytotalmarket_list.csv",
+    "NIFTY FNO":               "API:SECURITIES IN F&O",
+
+    # ─── Sectoral Indices ──────────────────────────────────────────────────────
     "Bank Nifty":              f"{NSE_BASE}/ind_niftybanklist.csv",
     "Fin Nifty":               f"{NSE_BASE}/ind_niftyfinancialserviceslist.csv",
-    "Nifty PSU Bank":          f"{NSE_BASE}/ind_niftypsubanklist.csv",
-    "Nifty Private Bank":      f"{NSE_BASE}/ind_niftyprivatebankindex.csv",   # falls back to static
-    # Sectoral — Others
     "Nifty IT":                f"{NSE_BASE}/ind_niftyitlist.csv",
     "Nifty Pharma":            f"{NSE_BASE}/ind_niftypharmalist.csv",
     "Nifty Auto":              f"{NSE_BASE}/ind_niftyautolist.csv",
     "Nifty FMCG":              f"{NSE_BASE}/ind_niftyfmcglist.csv",
     "Nifty Metal":             f"{NSE_BASE}/ind_niftymetallist.csv",
     "Nifty Realty":            f"{NSE_BASE}/ind_niftyrealtylist.csv",
+    "Nifty Media":             f"{NSE_BASE}/ind_niftymedialist.csv",
     "Nifty Energy":            f"{NSE_BASE}/ind_niftyenergylist.csv",
     "Nifty Healthcare":        f"{NSE_BASE}/ind_niftyhealthcarelist.csv",
+    "Nifty Consumer Durables": f"{NSE_BASE}/ind_niftyconsumerdurableslist.csv",
+    "Nifty Oil & Gas":         f"{NSE_BASE}/ind_niftyoilgaslist.csv",
     "Nifty Infrastructure":    f"{NSE_BASE}/ind_niftyinfralist.csv",
-    "Nifty India Defence":     f"{NSE_BASE}/ind_niftyindiadefence.csv",       # falls back to static
+    "Nifty PSU Bank":          f"{NSE_BASE}/ind_niftypsubanklist.csv",
+    "Nifty Private Bank":      f"{NSE_BASE}/ind_niftyprivatebankindex.csv",
+
+    # ─── Thematic & Strategy ───────────────────────────────────────────────────
+    "Nifty India Defence":     f"{NSE_BASE}/ind_niftyindiadefence.csv",
     "Nifty CPSE":              f"{NSE_BASE}/ind_niftycpselist.csv",
     "Nifty MNC":               f"{NSE_BASE}/ind_niftymnclist.csv",
-    # Exchange Wide (Fyers Master)
+    "Nifty PSE":               f"{NSE_BASE}/ind_niftypselist.csv",
+    "Nifty Services Sector":   f"{NSE_BASE}/ind_niftyserviceslist.csv",
+    "Nifty Commodities":       f"{NSE_BASE}/ind_niftycommoditieslist.csv",
+    "Nifty India Consumption": f"{NSE_BASE}/ind_niftyindiaconsumptionlist.csv",
+    "Nifty Digital India":     f"{NSE_BASE}/ind_niftydigitalindialist.csv",
+    "Nifty India Manufacturing": f"{NSE_BASE}/ind_niftyindiamanufacturinglist.csv",
+    
+    # ─── Tracking: Index Spot Prices (Prices, NOT constituent lists) ──────────
+    "MAJOR INDICES (Spot)":    "STATIC:MAJOR_INDICES",
+
+    # ─── Full Markets ──────────────────────────────────────────────────────────
     "ALL NSE":                 "https://public.fyers.in/sym_details/NSE_CM.csv",
     "ALL BSE":                 "https://public.fyers.in/sym_details/BSE_CM.csv",
 }
 
-# Fallback static data for indices where NSE archive CSV is not publicly available.
-# These are kept up-to-date with official NSE index composition (semi-annual review).
+# Fallback static data for indices where NSE archive CSV is not publicly available 
+# OR for custom tracker lists like "MAJOR INDICES".
 _STATIC_FALLBACK: dict[str, list[str]] = {
-    # ── Fin Nifty (25 stocks) ───────────────────────────────────────────────
+    # ── Major Indices (Price Symbols for Fyers) ───────────────────────────
+    "MAJOR INDICES (Spot)": [
+        "NSE:NIFTY50-INDEX", "NSE:NIFTYBANK-INDEX", "NSE:FINNIFTY-INDEX",
+        "NSE:MIDCPNIFTY-INDEX", "NSE:NIFTYNEXT50-INDEX", "NSE:NIFTY100-INDEX",
+        "NSE:NIFTY500-INDEX", "NSE:NIFTYIT-INDEX", "NSE:NIFTYAUTO-INDEX",
+        "NSE:NIFTYPHARMA-INDEX", "NSE:NIFTYMETAL-INDEX", "NSE:NIFTYREALTY-INDEX",
+        "NSE:NIFTYFMCG-INDEX", "NSE:NIFTYENERGY-INDEX", "NSE:NIFTYINFRA-INDEX",
+        "NSE:NIFTYPSE-INDEX", "NSE:NIFTYCPSE-INDEX", "NSE:NIFTYCOMMODITIES-INDEX",
+        "NSE:NIFTYCONSUMPTION-INDEX", "NSE:NIFTYMNC-INDEX", "NSE:NIFTYSERVSECTOR-INDEX",
+        "NSE:NIFTYMID150-INDEX", "NSE:NIFTYSMLCAP250-INDEX", "NSE:NIFTYMIDSML400-INDEX",
+        "NSE:NIFTYMEDIA-INDEX", "NSE:NIFTYPSUBANK-INDEX", "NSE:NIFTYPVTBANK-INDEX",
+        "NSE:NIFTYHEALTHCARE-INDEX", "NSE:NIFTYOILANDGAS-INDEX", "NSE:NIFTYCONSRDURBL-INDEX",
+        "NSE:NIFTYMICROCAP250-INDEX", "NSE:NIFTYINDDEFENCE-INDEX"
+    ],
+    # ── Fin Nifty (Constituents) ───────────────────────────────────────────────
     "Fin Nifty": [
         "NSE:AXISBANK-EQ", "NSE:BAJFINANCE-EQ", "NSE:BAJAJFINSV-EQ",
         "NSE:CHOLAFIN-EQ", "NSE:HDFCBANK-EQ", "NSE:HDFCLIFE-EQ",
@@ -81,14 +111,14 @@ _STATIC_FALLBACK: dict[str, list[str]] = {
         "NSE:M&MFIN-EQ", "NSE:MANAPPURAM-EQ", "NSE:POONAWALLA-EQ",
         "NSE:ANGELONE-EQ", "NSE:360ONE-EQ",
     ],
-    # ── Nifty Private Bank (10 stocks) ──────────────────────────────────────
+    # ── Nifty Private Bank (Constituents) ──────────────────────────────────────
     "Nifty Private Bank": [
         "NSE:AXISBANK-EQ", "NSE:HDFCBANK-EQ", "NSE:ICICIBANK-EQ",
         "NSE:KOTAKBANK-EQ", "NSE:INDUSINDBK-EQ", "NSE:FEDERALBNK-EQ",
         "NSE:YESBANK-EQ", "NSE:BANDHANBNK-EQ", "NSE:RBLBANK-EQ",
         "NSE:IDFCFIRSTB-EQ",
     ],
-    # ── Nifty Midcap Select (25 stocks) ─────────────────────────────────────
+    # ── Nifty Midcap Select (Constituents) ─────────────────────────────────────
     "Nifty Midcap Select": [
         "NSE:AUBANK-EQ", "NSE:ABCAPITAL-EQ", "NSE:ALKEM-EQ",
         "NSE:ASTRAL-EQ", "NSE:BHEL-EQ", "NSE:COFORGE-EQ",
@@ -100,7 +130,7 @@ _STATIC_FALLBACK: dict[str, list[str]] = {
         "NSE:PERSISTENT-EQ", "NSE:PHOENIXLTD-EQ", "NSE:SUPREMEIND-EQ",
         "NSE:TORNTPHARM-EQ",
     ],
-    # ── Nifty India Defence (thematic, ~20 stocks) ──────────────────────────
+    # ── Nifty India Defence ──────────────────────────────────────────────────
     "Nifty India Defence": [
         "NSE:BEL-EQ", "NSE:HAL-EQ", "NSE:BHARATFORG-EQ",
         "NSE:SOLARINDS-EQ", "NSE:MAZDOCK-EQ", "NSE:BDL-EQ",
@@ -212,6 +242,38 @@ def _fetch_nse_csv(url: str, timeout: int = 15) -> Optional[pd.DataFrame]:
         return None
 
 
+def _fetch_nse_json(index_name_api: str) -> Optional[list[str]]:
+    """Fetch symbols from NSE API JSON"""
+    try:
+        session = requests.Session()
+        # Hit NSE homepage to get fresh cookies
+        session.get("https://www.nseindia.com", headers=_HEADERS, timeout=10)
+        
+        # Format the API URL
+        import urllib.parse
+        encoded_name = urllib.parse.quote(index_name_api)
+        url = f"https://www.nseindia.com/api/equity-stockIndices?index={encoded_name}"
+        
+        logger.info(f"[SymbolManager] Fetching JSON from {url}...")
+        resp = session.get(url, headers=_HEADERS, timeout=15)
+        resp.raise_for_status()
+        
+        data = resp.json()
+        if 'data' not in data:
+            logger.warning(f"[SymbolManager] JSON response missing 'data' key for {index_name_api}")
+            return None
+            
+        symbols = [item['symbol'] for item in data['data'] if item.get('symbol')]
+        # Filter out obvious indices if any (safety)
+        symbols = [s for s in symbols if s not in ["NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY"]]
+        
+        return symbols
+
+    except Exception as e:
+        logger.warning(f"[SymbolManager] Failed to fetch JSON for {index_name_api}: {e}")
+        return None
+
+
 def _nse_symbols_to_fyers(nse_symbols: list[str]) -> list[str]:
     """Convert NSE symbol list to Fyers format: RELIANCE → NSE:RELIANCE-EQ"""
     fyers_symbols = []
@@ -318,16 +380,36 @@ def get_symbols(index_name: str, force_refresh: bool = False) -> list[str]:
     # 2. Fetch fresh from source
     url = INDEX_SOURCES[index_name]
     
-    # Check if it's an ALL Exchange case
-    if index_name.startswith("ALL "):
+    # Case A: Static mapping
+    if url.startswith("STATIC:"):
+        key = url.split(":")[1]
+        static_data = _STATIC_FALLBACK.get(index_name) or _STATIC_FALLBACK.get(key, [])
+        if static_data:
+            _write_cache(index_name, static_data)
+            return static_data
+
+    # Case B: ALL Exchange (Large Master)
+    elif index_name.startswith("ALL "):
         prefix = "NSE" if "NSE" in index_name else "BSE"
         fyers_symbols = _fetch_fyers_master(url, prefix)
         if fyers_symbols:
             _write_cache(index_name, fyers_symbols)
             logger.info(f"[SymbolManager] Cached {len(fyers_symbols)} symbols for {index_name}")
             return fyers_symbols
+    
+    # Case C: NSE API JSON
+    elif url.startswith("API:"):
+        api_index = url.split(":")[1]
+        logger.info(f"[SymbolManager] Fetching {index_name} via NSE API...")
+        nse_symbols = _fetch_nse_json(api_index)
+        if nse_symbols:
+            fyers_symbols = _nse_symbols_to_fyers(nse_symbols)
+            _write_cache(index_name, fyers_symbols)
+            logger.info(f"[SymbolManager] Cached {len(fyers_symbols)} symbols for {index_name}")
+            return fyers_symbols
+
+    # Case D: Standard NSE Index CSV
     else:
-        # Standard NSE Index CSV
         logger.info(f"[SymbolManager] Fetching {index_name} from NSE...")
         df = _fetch_nse_csv(url)
         if df is not None:
@@ -409,7 +491,8 @@ def get_cache_status() -> list[dict]:
 SECTOR_INDICES = [
     "Bank Nifty", "Nifty IT", "Nifty Pharma", "Nifty Auto", 
     "Nifty FMCG", "Nifty Metal", "Nifty Realty", "Nifty Energy", 
-    "Nifty Healthcare", "Nifty Infrastructure", "Nifty India Defence",
+    "Nifty Media", "Nifty Healthcare", "Nifty Infrastructure", 
+    "Nifty Consumer Durables", "Nifty Oil & Gas", "Nifty India Defence",
     "Nifty PSU Bank", "Nifty Private Bank", "Fin Nifty"
 ]
 

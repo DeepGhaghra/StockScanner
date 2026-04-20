@@ -35,6 +35,9 @@ class StockDatabase:
             conn.execute("CREATE INDEX IF NOT EXISTS idx_ohlcv_symbol ON ohlcv (symbol, resolution)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_ohlcv_datetime ON ohlcv (datetime)")
             
+            # Enable WAL mode for better concurrency
+            conn.execute("PRAGMA journal_mode=WAL")
+            
             # Metadata for sync tracking
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS metadata (

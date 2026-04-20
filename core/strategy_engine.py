@@ -99,70 +99,53 @@ def strategy_dow_trend(df: pd.DataFrame, params: dict = {}) -> StrategyResult:
     )
 
 
-def strategy_strong_bullish_candle(df: pd.DataFrame, params: dict = {}) -> StrategyResult:
-    """
-    Strong Bullish Candle:
-    - Last candle is green
-    - Body > min_body_pct% of total candle range (default: 60%)
-    """
-    name = "Strong Bullish Candle"
-    min_body_pct = params.get("min_body_pct", 60.0)
-
-    if len(df) < 1:
-        return StrategyResult(False, name, {"error": "Not enough data"})
-
-    last = df.iloc[-1]
-    is_green = bool(last["is_green"])
-    body_pct = last["body_pct"] if not np.isnan(last["body_pct"]) else 0.0
-    strong_body = body_pct >= min_body_pct
-
-    matched = is_green and strong_body
-    return StrategyResult(
-        matched=matched,
-        strategy_name=name,
-        details={
-            "close": round(last["close"], 2),
-            "open": round(last["open"], 2),
-            "body_pct": round(body_pct, 1),
-            "min_body_pct": min_body_pct,
-            "is_green": is_green,
-        },
-    )
-
-
 def strategy_sma50_support_bounce(df: pd.DataFrame, params: dict = {}) -> StrategyResult:
     """
-    50 SMA Support Bounce:
-    - Price within ±X% of SMA50 (default: 2%)
-    - Previous candle was red
+    50 SMA Support Bounce (Support Only):
+    - SMA50 is RISING (stock is in an uptrend; SMA acts as support, not resistance)
+    - Price dipped to/near SMA50 from above (low touched the zone)
+    - Close is ABOVE SMA50 (bounce confirmed — NOT rejected from below)
+    - Previous candle was red (pullback into the SMA)
     - Current candle is green (bounce confirmation)
     """
     name = "50 SMA Support Bounce"
     proximity_pct = params.get("proximity_pct", 2.0)
 
-    if len(df) < 51:
+    if len(df) < 52:
         return StrategyResult(False, name, {"error": "Not enough data for SMA50"})
 
     last = df.iloc[-1]
     prev = df.iloc[-2]
 
-    sma50 = last["sma_50"]
-    if np.isnan(sma50):
+    sma50_curr = last["sma_50"]
+    sma50_prev = prev["sma_50"]
+    if np.isnan(sma50_curr) or np.isnan(sma50_prev):
         return StrategyResult(False, name, {"error": "SMA50 is NaN"})
 
-    price_to_sma_pct = abs(last["close"] - sma50) / sma50 * 100
-    near_sma = price_to_sma_pct <= proximity_pct
+    # 1. SMA must be RISING — confirms uptrend, SMA is acting as support not resistance
+    sma_rising = sma50_curr > sma50_prev
+
+    # 2. Close must be ABOVE SMA — stock bounced FROM support, not rejected FROM resistance
+    close_above_sma = last["close"] > sma50_curr
+
+    # 3. The low must have dipped to/near the SMA zone (touched the support)
+    low_touched_sma_pct = abs(last["low"] - sma50_curr) / sma50_curr * 100
+    low_touched_zone = low_touched_sma_pct <= proximity_pct
+
+    # 4. Green close after a red candle (bounce trigger)
     prev_red = bool(prev["is_red"])
     curr_green = bool(last["is_green"])
 
-    matched = near_sma and prev_red and curr_green
+    matched = sma_rising and close_above_sma and low_touched_zone and prev_red and curr_green
     return StrategyResult(
         matched=matched,
         strategy_name=name,
         details={
             "close": round(last["close"], 2),
-            "sma_50": round(sma50, 2),
-            "price_to_sma_pct": round(price_to_sma_pct, 2),
+            "sma_50": round(sma50_curr, 2),
+            "sma_rising": sma_rising,
+            "close_above_sma": close_above_sma,
+            "low_to_sma_pct": round(low_touched_sma_pct, 2),
             "proximity_pct": proximity_pct,
             "prev_red": prev_red,
             "curr_green": curr_green,
@@ -398,7 +381,6 @@ def strategy_ath_proximity(df: pd.DataFrame, params: dict = {}) -> StrategyResul
 
 STRATEGIES: dict[str, Callable] = {
     "Dow Trend (HH/HL)": strategy_dow_trend,
-    "Strong Bullish Candle": strategy_strong_bullish_candle,
     "50 SMA Support Bounce": strategy_sma50_support_bounce,
     "RSI Momentum": strategy_rsi_momentum,
     "Volume Spike Breakout": strategy_volume_spike_breakout,
@@ -409,7 +391,6 @@ STRATEGIES: dict[str, Callable] = {
 
 STRATEGY_PARAMS: dict[str, dict] = {
     "Dow Trend (HH/HL)": {"pivot_strength": 5},
-    "Strong Bullish Candle": {"min_body_pct": 60.0},
     "50 SMA Support Bounce": {"proximity_pct": 2.0},
     "RSI Momentum": {"rsi_threshold": 60.0},
     "Volume Spike Breakout": {"vol_multiplier": 2.0},
@@ -420,7 +401,6 @@ STRATEGY_PARAMS: dict[str, dict] = {
 
 STRATEGY_DESCRIPTIONS: dict[str, str] = {
     "Dow Trend (HH/HL)": "📈 Structural Uptrend: Detects a sequence of Higher Highs and Higher Lows according to Dow Theory. Confirms the stock is in a healthy structural bull trend.",
-    "Strong Bullish Candle": "💪 Buying Conviction: Large body with tiny wicks. Indicates that the stock opened low and closed near its high with zero selling pressure.",
     "50 SMA Support Bounce": "🔥 Trend Support: Price touched or neared the 50 SMA and bounced back with a green candle. Classic 'Buy the Dip' setup in an uptrend.",
     "RSI Momentum": "⚡ High Velocity: RSI is above your threshold (default 60) and heading higher. Best for catching stocks in a 'Runaway' phase.",
     "Volume Spike Breakout": "📊 Institutional Entry: Volume is at least 2x higher than the 20-day average. Combined with a green close, it signals major smart money activity.",

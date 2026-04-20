@@ -10,6 +10,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 from dotenv import load_dotenv
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 load_dotenv()
 
@@ -29,9 +30,10 @@ from auth import (
     load_token,
     get_token_info,
 )
-from core.data_fetcher import fetch_ohlcv, get_fyers_client, clear_cache
+from core.data_fetcher import fetch_ohlcv, get_fyers_client, clear_cache, validate_session
 from core.indicators import add_all_indicators
 from core.scanner import run_scan
+from core.momentum import run_momentum_scan
 from plotly.subplots import make_subplots
 from core.strategy_engine import STRATEGIES, STRATEGY_DESCRIPTIONS, STRATEGY_PARAMS, find_pivots
 from core.symbol_manager import (
@@ -41,6 +43,7 @@ from core.symbol_manager import (
     refresh_all_indices,
     get_custom_watchlist_symbols,
 )
+from core.result_manager import clear_results_cache
 
 # ─── Load Custom CSS ─────────────────────────────────────────────────────────
 def load_css(file_name):
@@ -62,6 +65,7 @@ for key, default in [
     ("scan_meta", {}),
     ("fyers_client", None),
     ("symbols_loaded", {}),
+    ("max_workers", 10),
 ]:
     if key not in st.session_state:
         st.session_state[key] = default
@@ -227,8 +231,8 @@ with col_status:
 st.divider()
 
 # ─── Tabs ─────────────────────────────────────────────────────────────────────
-tab_scanner, tab_hunter, tab_details, tab_indices, tab_settings, tab_watchlist = st.tabs(
-    ["🔍 Scanner", "🧬 Signal Hunter", "📊 Results Detail", "📑 Index Manager", "⚙️ Settings & Auth", "📂 Watchlist"]
+tab_scanner, tab_hunter, tab_details, tab_indices, tab_settings, tab_watchlist, tab_momentum = st.tabs(
+    ["🔍 Scanner", "🧬 Signal Hunter", "📊 Results Detail", "📑 Index Manager", "⚙️ Settings & Auth", "📂 Watchlist", "🚀 Momentum"]
 )
 
 
@@ -241,8 +245,8 @@ with tab_hunter:
 
     h1, h2, h3, h4 = st.columns([2, 2, 2, 1])
     with h1:
-        final_sym = st.text_input("🎯 Enter Stock Symbol", value="NSE:SBIN-EQ", placeholder="e.g. NSE:RELIANCE or BSE:532174").upper()
-        st.caption("💡 NSE:SBIN-EQ, BSE:500112-B")
+        final_sym = st.text_input("🎯 Enter Stock Symbol", value="NSE:SBIN", placeholder="e.g. NSE:RELIANCE or BSE:532174").upper()
+        st.caption("💡 NSE:SBIN, BSE:ECORECO")
 
     with h2:
         h_strat = st.selectbox("🎯 Strategy", options=list(STRATEGIES.keys()), key="h_st")
@@ -253,12 +257,14 @@ with tab_hunter:
         
     with h4:
         st.markdown("<div style='margin-top: 24px;'></div>", unsafe_allow_html=True)
-        hunt_btn = st.button("🔥 HUNT", use_container_width=True, type="primary")
+        hunt_btn = st.button("🔥 HUNT", width="stretch", type="primary")
 
     if hunt_btn:
         fyers = get_fyers()
         if not fyers:
             st.error("Please login first!")
+        elif not validate_session(fyers):
+            st.error("🔑 **Fyers Token Expired!** Please re-login in the **Settings & Auth** tab.")
         else:
             with st.spinner(f"Hunting {h_strat} signals for {final_sym}..."):
                 # Fetch more data for backtesting (Buffer for SMA)
@@ -306,7 +312,7 @@ with tab_hunter:
                     if signals:
                         st.success(f"Found {len(signals)} signals!")
                         signals_df = pd.DataFrame(signals).iloc[::-1]
-                        st.dataframe(signals_df, use_container_width=True)
+                        st.dataframe(signals_df, width="stretch")
                     else:
                         st.info("No signals found in the selected period.")
                         with st.expander("🛠️ Debug Information (Why 0 signals?)", expanded=False):
@@ -334,7 +340,7 @@ with tab_scanner:
     c1, c2, c3, c4, c5 = st.columns([1.6, 1.4, 2.5, 2.5, 1.8])
     
     with c1:
-        scan_date = st.date_input("📅 Date", value=date.today(), max_value=date.today())
+        scan_date = st.date_input("📅 Date", value=date.today(), max_value=date.today(), format="DD/MM/YYYY")
 
     with c2:
         resolution = st.selectbox(
@@ -351,49 +357,55 @@ with tab_scanner:
     with c4:
         selected_strategies = st.multiselect("🎯 Setup", options=list(STRATEGIES.keys()), default=["Dow Trend (HH/HL)"])
         
-        # Guide Preview (Small text below selection)
-        if selected_strategies:
-            last_sel = selected_strategies[-1]
-            st.caption(f"ℹ️ {STRATEGY_DESCRIPTIONS.get(last_sel, '').split(':')[0]}")
-
         strategy_params = {}
         strategy_logic = "OR"
         if selected_strategies:
-            with st.popover("⚙️ Params & Guide"):
-                st.markdown("### 🎯 Global Match Mode")
-                strategy_logic = st.radio("Logic", ["Any (OR)", "All (AND)"], index=0, horizontal=True, help="Any: Shows stocks matching at least one setup. All: Shows only stocks matching ALL selected setups.")
-                strategy_logic = "AND" if "All" in strategy_logic else "OR"
-                st.divider()
-                st.markdown("### 📚 Setup Guide")
-                for s in selected_strategies:
-                    st.info(f"**{s}**: {STRATEGY_DESCRIPTIONS.get(s, '')}")
-                
-                st.divider()
-                st.markdown("### 🔧 Fine-tune Logic")
-                for s in selected_strategies:
-                    st.markdown(f"**{s}**")
-                    defaults = STRATEGY_PARAMS.get(s, {})
-                    p = {}
-                    pc = st.columns(2)
-                    if "min_body_pct" in defaults: p["min_body_pct"] = pc[0].number_input("Body%", 20.0, 90.0, float(defaults["min_body_pct"]), 5.0, key=f"p_{s}_b")
-                    if "proximity_pct" in defaults: p["proximity_pct"] = pc[1].number_input("SMA%", 0.5, 5.0, float(defaults["proximity_pct"]), 0.5, key=f"p_{s}_px")
-                    if "rsi_threshold" in defaults: p["rsi_threshold"] = pc[0].number_input("RSI", 40.0, 85.0, float(defaults["rsi_threshold"]), 5.0, key=f"p_{s}_rs")
-                    if "vol_multiplier" in defaults: p["vol_multiplier"] = pc[1].number_input("VolX", 1.0, 5.0, float(defaults["vol_multiplier"]), 0.5, key=f"p_{s}_vl")
-                    if "abc_proximity_pct" in defaults: p["abc_proximity_pct"] = pc[0].number_input("Prox%", 0.1, 3.0, float(defaults["abc_proximity_pct"]), 0.1, key=f"p_{s}_abc")
-                    if "ath_threshold_pct" in defaults: p["ath_threshold_pct"] = pc[1].number_input("ATH%", 0.1, 15.0, float(defaults["ath_threshold_pct"]), 0.5, key=f"p_{s}_ath")
-                    if "pivot_strength" in defaults: p["pivot_strength"] = pc[0].number_input("Pivot Strength", 2, 20, int(defaults["pivot_strength"]), 1, key=f"p_{s}_piv")
-                    strategy_params[s] = p
+            cc1, cc2 = st.columns([1.5, 1])
+            with cc1:
+                last_sel = selected_strategies[-1]
+                st.caption(f"ℹ️ {STRATEGY_DESCRIPTIONS.get(last_sel, '').split(':')[0]}")
+            with cc2:
+                with st.popover("⚙️ Params"):
+                    st.markdown("### 🎯 Global Match Mode")
+                    strategy_logic = st.radio("Logic", ["Any (OR)", "All (AND)"], index=0, horizontal=True, help="Any: Shows stocks matching at least one setup. All: Shows only stocks matching ALL selected setups.")
+                    strategy_logic = "AND" if "All" in strategy_logic else "OR"
+                    st.divider()
+                    pg_col1, pg_col2 = st.columns([1.1, 1])
+                    
+                    with pg_col1:
+                        st.markdown("### 📚 Setup Guide")
+                        for s in selected_strategies:
+                            st.info(f"**{s}**: {STRATEGY_DESCRIPTIONS.get(s, '')}")
+                    
+                    with pg_col2:
+                        st.markdown("### 🔧 Fine-tune Logic")
+                        for s in selected_strategies:
+                            st.markdown(f"**{s}**")
+                            defaults = STRATEGY_PARAMS.get(s, {})
+                            p = {}
+                            pc = st.columns(2)
+                            # Display inputs based on what's available in defaults
+                            if "min_body_pct" in defaults: p["min_body_pct"] = pc[0].number_input("Body%", 20.0, 90.0, float(defaults["min_body_pct"]), 5.0, key=f"p_{s}_b")
+                            if "proximity_pct" in defaults: p["proximity_pct"] = pc[1].number_input("SMA%", 0.5, 5.0, float(defaults["proximity_pct"]), 0.5, key=f"p_{s}_px")
+                            if "rsi_threshold" in defaults: p["rsi_threshold"] = pc[0].number_input("RSI", 40.0, 85.0, float(defaults["rsi_threshold"]), 5.0, key=f"p_{s}_rs")
+                            if "vol_multiplier" in defaults: p["vol_multiplier"] = pc[1].number_input("VolX", 1.0, 5.0, float(defaults["vol_multiplier"]), 0.5, key=f"p_{s}_vl")
+                            if "abc_proximity_pct" in defaults: p["abc_proximity_pct"] = pc[0].number_input("Prox%", 0.1, 3.0, float(defaults["abc_proximity_pct"]), 0.1, key=f"p_{s}_abc")
+                            if "ath_threshold_pct" in defaults: p["ath_threshold_pct"] = pc[1].number_input("ATH%", 0.1, 15.0, float(defaults["ath_threshold_pct"]), 0.5, key=f"p_{s}_ath")
+                            if "pivot_strength" in defaults: p["pivot_strength"] = pc[0].number_input("Pivot Strength", 2, 20, int(defaults["pivot_strength"]), 1, key=f"p_{s}_piv")
+                            strategy_params[s] = p
         
 
     with c5:
         st.markdown("<div style='margin-top: 24px;'></div>", unsafe_allow_html=True)
-        run_btn = st.button("🚀 SCAN", use_container_width=True, type="primary")
+        run_btn = st.button("🚀 SCAN", width="stretch", type="primary")
 
     # ── Main Panel ────────────────────────────────────────────────────────────
     if run_btn:
         fyers = get_fyers()
         if fyers is None:
             st.error("⚠️ No valid Fyers token. Go to **Settings & Auth** tab to login first.")
+        elif not validate_session(fyers):
+            st.error("🔑 **Fyers Token Expired!** Please re-login in the **Settings & Auth** tab.")
         elif not selected_strategies:
             st.warning("Please select at least one strategy from the sidebar.")
         elif not symbols:
@@ -416,6 +428,7 @@ with tab_scanner:
                 logic=strategy_logic,
                 strategy_params=strategy_params,
                 progress_callback=on_progress,
+                max_workers=st.session_state.max_workers,
             )
 
             elapsed = time.time() - t_start
@@ -496,6 +509,11 @@ with tab_scanner:
                         tags = "".join([f'<span class="strategy-tag">{s.strip()}</span>' for s in row['Strategies Matched'].split(",")])
                         sector_badge = f'<span style="font-size:0.7rem; background:#f1f5f9; color:#64748b; padding:2px 6px; border-radius:4px; font-weight:600;">{row["Sector"]}</span>'
                         
+                        # Format indicators safely
+                        rsi_val = f"{row['RSI']:.1f}" if pd.notna(row['RSI']) else "N/A"
+                        sma_val = f"{row['SMA50']:.0f}" if pd.notna(row['SMA50']) else "N/A"
+                        vol_val = f"{row['Vol Ratio']:.1f}x" if pd.notna(row['Vol Ratio']) else "N/A"
+                        
                         with cols[j]:
                             st.markdown(f"""
                             <div class="result-card" style="min-height:230px; display:flex; flex-direction:column; justify-content:space-between;">
@@ -512,9 +530,9 @@ with tab_scanner:
                                 </div>
                                 <div style="border-top:1px solid #f1f5f9; padding-top:10px;">
                                     <div style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:2px; text-align:center; margin-bottom:10px;">
-                                        <div><div class="label-muted">RSI</div><div class="indicator-val" style="font-size:1rem;">{row['RSI']:.1f}</div></div>
-                                        <div><div class="label-muted">SMA50</div><div class="indicator-val" style="font-size:1rem;">{row['SMA50']:.0f}</div></div>
-                                        <div><div class="label-muted">VOL</div><div class="indicator-val" style="font-size:1rem;">{row['Vol Ratio']:.1f}x</div></div>
+                                        <div><div class="label-muted">RSI</div><div class="indicator-val" style="font-size:1rem;">{rsi_val}</div></div>
+                                        <div><div class="label-muted">SMA50</div><div class="indicator-val" style="font-size:1rem;">{sma_val}</div></div>
+                                        <div><div class="label-muted">VOL</div><div class="indicator-val" style="font-size:1rem;">{vol_val}</div></div>
                                     </div>
                                     <a href="{tv_url}" target="_blank" style="text-decoration:none;">
                                         <div style="text-align:center; background:linear-gradient(135deg, #6366f1, #a855f7); color:white; border-radius:8px; font-size:0.8rem; font-weight:700; padding:8px 0;">📊 Chart</div>
@@ -556,7 +574,7 @@ with tab_details:
                     candles = row.get("_df", [])
                     if candles:
                         fig = make_candlestick(candles, row["Name"], row["Strategies Matched"])
-                        st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+                        st.plotly_chart(fig, width="stretch", config={"displayModeBar": False})
                 with col_b:
                     st.markdown("**📊 Indicator Snapshot**")
                     st.metric("Close", f"₹{row['Close']:.2f}")
@@ -575,14 +593,14 @@ with tab_details:
                         st.markdown(f"*{strategy_name}*")
                         # FIX: string conversion to prevent Arrow mixed-type errors
                         detail_df = pd.DataFrame([{"Parameter": str(k), "Value": str(v)} for k, v in d.items()])
-                        st.dataframe(detail_df, use_container_width=True, hide_index=True, height=min(200, 50 + len(detail_df)*35))
+                        st.dataframe(detail_df, width="stretch", hide_index=True, height=min(200, 50 + len(detail_df)*35))
 
                 candles = row.get("_df", [])
                 if candles:
                     st.markdown("**🕯️ Last Candles**")
                     cdf = pd.DataFrame(candles)[["datetime","open","high","low","close","volume"]].tail(5)
                     cdf.columns = ["DateTime","Open","High","Low","Close","Volume"]
-                    st.dataframe(cdf, use_container_width=True, hide_index=True)
+                    st.dataframe(cdf, width="stretch", hide_index=True)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -601,7 +619,7 @@ with tab_indices:
         st.markdown("**📋 Index Cache Status**")
         st.dataframe(
             status_df,
-            use_container_width=True,
+            width="stretch",
             hide_index=True,
             height=min(700, 56 + len(status_df) * 38),
             column_config={
@@ -671,7 +689,7 @@ with tab_indices:
                     "Fyers Symbol": syms,
                     "Name": [display_name(s) for s in syms],
                 })
-                st.dataframe(preview_df, use_container_width=True, hide_index=True, height=300)
+                st.dataframe(preview_df, width="stretch", hide_index=True, height=300)
                 st.caption(f"Total: {len(syms)} stocks")
             else:
                 st.warning("No symbols found. Try refreshing this index.")
@@ -736,15 +754,26 @@ with tab_settings:
         st.markdown(f"**Client ID:** `{client_id}`")
         st.markdown(f"**Secret:** `{'*' * min(len(secret_key), 8)}`")
         st.markdown(f"**Redirect URI:** `{redirect}`")
+        
+        st.divider()
+        st.markdown("### ⚡ Performance Settings")
+        st.session_state.max_workers = st.slider(
+            "Parallel Threads (Concurrency)", 
+            min_value=1, 
+            max_value=30, 
+            value=st.session_state.max_workers,
+            help="Number of simultaneous stock scans. Higher is faster but may trigger Fyers rate limits."
+        )
 
         st.divider()
         st.markdown("### 🔄 Session")
         if st.button("🗑️ Clear All Cache", key="btn_cache_clr"):
             clear_cache()
+            clear_results_cache()
             cached_get_symbols.clear()
             st.session_state.fyers_client = None
             st.session_state.scan_results = None
-            st.success("Cache cleared.")
+            st.success("All caches cleared (Data + Results).")
 
     st.divider()
     st.markdown("### 🗄️ Local Database Monitor")
@@ -772,12 +801,12 @@ with tab_settings:
     col_s1, col_s2 = st.columns(2)
     
     if not st.session_state.sync_running:
-        if col_s1.button("🔥 START BULK SYNC", use_container_width=True, type="primary"):
+        if col_s1.button("🔥 START BULK SYNC", width="stretch", type="primary"):
             st.session_state.sync_running = True
             st.session_state.sync_stop = False
             st.rerun()
     else:
-        if col_s1.button("🛑 STOP SYNC", use_container_width=True):
+        if col_s1.button("🛑 STOP SYNC", width="stretch"):
             st.session_state.sync_stop = True
             st.warning("Stopping after current symbol...")
 
@@ -791,21 +820,38 @@ with tab_settings:
             status_overall = st.empty()
             
             total = len(sync_symbols)
-            for i, sym in enumerate(sync_symbols):
-                if st.session_state.sync_stop:
-                    st.session_state.sync_running = False
-                    st.info("Sync stopped by user.")
-                    break
-                
-                progress_overall.progress((i + 1) / total, text=f"Syncing {i+1}/{total}: {sym}")
-                status_overall.caption(f"Current Target: {sym}")
-                
+            processed = 0
+            
+            def _sync_worker(sym):
                 try:
-                    # fetch_ohlcv handles the internal DB sync since 1994 for Daily res
                     fetch_ohlcv(fyers, sym, "D", date.today(), 100)
+                    return sym, True, None
                 except Exception as e:
-                    st.warning(f"Failed to sync {sym}: {e}")
                     time.sleep(1)
+                    return sym, False, str(e)
+            
+            with ThreadPoolExecutor(max_workers=st.session_state.max_workers) as executor:
+                future_to_sym = {executor.submit(_sync_worker, sym): sym for sym in sync_symbols}
+                
+                for future in as_completed(future_to_sym):
+                    if st.session_state.sync_stop:
+                        for f in future_to_sym:
+                            f.cancel()
+                        st.session_state.sync_running = False
+                        st.info("Sync stopped by user.")
+                        break
+                    
+                    sym, success, err = future.result()
+                    processed += 1
+                    
+                    try:
+                        progress_overall.progress(processed / total, text=f"Syncing {processed}/{total}: {sym}")
+                        status_overall.caption(f"Current Target: {sym}")
+                    except Exception:
+                        pass
+                        
+                    if not success:
+                        st.warning(f"Failed to sync {sym}: {err}")
             
             st.session_state.sync_running = False
             progress_overall.empty()
@@ -886,3 +932,231 @@ with tab_watchlist:
             cached_get_symbols.clear()
             st.success("Cleared.")
             st.rerun()
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# TAB 7: MOMENTUM RANKING
+# ═══════════════════════════════════════════════════════════════════════════════
+with tab_momentum:
+    st.markdown("### 🚀 Multi-Factor Momentum Ranking")
+    st.caption(
+        "Stocks ranked by a **5-factor composite score** with a hard **SMA-200 filter**. "
+        "Pick any past date to backtest which stocks topped the momentum list on that day."
+    )
+
+    # ── Controls Row ──────────────────────────────────────────────────────────
+    mc1, mc2, mc3, mc4 = st.columns([2, 2, 2, 1.5])
+
+    with mc1:
+        m_index = st.selectbox(
+            "📂 Index Universe",
+            options=ALL_INDICES + [CUSTOM_OPT],
+            index=ALL_INDICES.index("Nifty Total Market") if "Nifty Total Market" in ALL_INDICES else 0,
+            key="mom_index_sel",
+        )
+
+    with mc2:
+        m_scan_date = st.date_input(
+            "📅 As-of Date  (backtest any day)",
+            value=date.today(),
+            max_value=date.today(),
+            format="DD/MM/YYYY",
+            key="mom_scan_date",
+            help="Choose today for a live scan, or any past date to see that day's top-100 momentum stocks.",
+        )
+        if m_scan_date < date.today():
+            st.caption(f"🕰️ Backtest mode — results as of **{m_scan_date.strftime('%d %b %Y')}**")
+
+    with mc3:
+        with st.expander("⚖️ Adjust Factor Weights"):
+            st.caption("Weights must sum to 100%")
+            w_f1 = st.slider("1-Year Return %",    0, 100, 50, 5, key="w1")
+            w_f3 = st.slider("100 EMA Distance",     0, 100, 35, 5, key="w3")
+            w_f4 = st.slider("Relative Volume",    0, 100, 15, 5, key="w4")
+            total_w = w_f1 + w_f3 + w_f4
+            if total_w != 100:
+                st.warning(f"⚠️ Weights sum to **{total_w}%** — must be 100%")
+            else:
+                st.success("✅ Weights sum to 100%")
+        custom_weights = {
+            "return_12m": w_f1 / 100,
+            "ema100_dist": w_f3 / 100,
+            "rel_volume": w_f4 / 100,
+        }
+
+    with mc4:
+        st.markdown("<div style='margin-top:24px;'></div>", unsafe_allow_html=True)
+        run_mom_btn = st.button(
+            "🚀 RUN SCAN",
+            type="primary",
+            use_container_width=True,
+            key="run_mom_btn",
+            disabled=(w_f1 + w_f3 + w_f4 != 100),
+        )
+
+    st.divider()
+
+    # ── Run Scan ─────────────────────────────────────────────────────────────
+    if run_mom_btn:
+        fyers = get_fyers()
+        if not fyers:
+            st.error("⚠️ No valid Fyers token. Go to **Settings & Auth** tab to login first.")
+        elif not validate_session(fyers):
+            st.error("🔑 **Fyers Token Expired!** Please re-login in the **Settings & Auth** tab.")
+        else:
+            m_symbols = cached_get_symbols(m_index)
+            if not m_symbols:
+                st.error(f"No symbols found for **{m_index}**. Go to Index Manager and refresh.")
+            else:
+                m_prog_bar = st.progress(0, text="Initialising momentum scan...")
+                m_status   = st.empty()
+
+                def on_mom_prog(current, total, sym):
+                    m_prog_bar.progress(current / total, text=f"Analysing {sym} ({current}/{total})...")
+                    m_status.caption(f"⚙️ Processing: `{sym}`")
+
+                mt_df, mt_stats = run_momentum_scan(
+                    fyers=fyers,
+                    symbols=m_symbols,
+                    scan_date=m_scan_date,
+                    weights=custom_weights,
+                    progress_callback=on_mom_prog,
+                    max_workers=st.session_state.max_workers,
+                )
+                m_prog_bar.empty()
+                m_status.empty()
+
+                if not mt_df.empty:
+                    st.session_state["momentum_df"]    = mt_df
+                    st.session_state["momentum_stats"] = mt_stats
+                    st.session_state["momentum_date"]  = m_scan_date
+                    st.session_state["momentum_index"] = m_index
+                    mode_label = "🕰️ Backtest (DB only)" if mt_stats.get("is_backtest") else f"🔄 Live (synced {mt_stats.get('synced', 0)} symbols)"
+                    st.success(
+                        f"✅ Ranked **{len(mt_df)} stocks**  |  {mode_label}  |  "
+                        f"Passed SMA-200: {mt_stats.get('passed', 0)}  |  "
+                        f"Filtered (below SMA-200): {mt_stats.get('filtered', 0)}  |  "
+                        f"No data: {mt_stats.get('failed', 0)}"
+                    )
+                else:
+                    st.error("No stocks passed the SMA-200 filter on this date. Try a broader index or an earlier date.")
+
+    # ── Results Display ───────────────────────────────────────────────────────
+    if (
+        "momentum_df" in st.session_state
+        and st.session_state["momentum_df"] is not None
+        and not st.session_state["momentum_df"].empty
+    ):
+        m_df    = st.session_state["momentum_df"]
+        m_stats = st.session_state.get("momentum_stats", {})
+        m_date  = st.session_state.get("momentum_date", date.today())
+        m_idx   = st.session_state.get("momentum_index", "")
+
+        # ── Header KPIs ──────────────────────────────────────────────────────
+        k1, k2, k3, k4 = st.columns(4)
+        render_metric_card("As-of Date", m_date.strftime("%d %b %Y"), k1)
+        render_metric_card("Universe", m_idx, k2)
+        render_metric_card("Passed SMA-200", m_stats.get("passed", len(m_df)), k3)
+        render_metric_card("SMA-200 Filtered", m_stats.get("sma_filtered", "–"), k4)
+
+        st.markdown("<br>", unsafe_allow_html=True)
+
+        # ── Tabs: Table | Chart ───────────────────────────────────────────────
+        tab_tbl, tab_chart = st.tabs(["📋 Ranked List", "📊 Score Breakdown"])
+
+        with tab_tbl:
+            display_cols = [
+                "Rank", "Name", "Composite Score", 
+                "12M Return %", "EMA100 Dist %", "Rel Volume",
+                "f1_12m", "f3_ema100", "f4_vol"
+            ]
+            disp_df = m_df[[c for c in display_cols if c in m_df.columns]]
+
+            # Dynamic styling based on available columns
+            common_format = {
+                "Close":           "₹{:.2f}",
+                "SMA200":          "₹{:.2f}",
+                "EMA100":          "₹{:.2f}",
+                "Composite Score": "{:.1f}",
+                "12M Return %":    "{:+.1f}%",
+                "EMA100 Dist %":   "{:+.1f}%",
+                "Rel Volume":      "{:.2f}×",
+                "f1_12m":          "{:.0f} pts",
+                "f3_ema100":       "{:.0f} pts",
+                "f4_vol":          "{:.0f} pts",
+            }
+            
+            # Filter format to only existing columns
+            fmt = {k: v for k, v in common_format.items() if k in disp_df.columns}
+            styled = disp_df.style.format(fmt)
+            
+            # Apply individual styles ONLY if columns exist
+            if "Composite Score" in disp_df.columns:
+                styled = styled.background_gradient(subset=["Composite Score"], cmap="YlGn")
+            if "12M Return %" in disp_df.columns:
+                styled = styled.bar(subset=["12M Return %"], color="#10b981", vmin=0)
+            if "EMA100 Dist %" in disp_df.columns:
+                styled = styled.bar(subset=["EMA100 Dist %"], color="#34d399", vmin=0)
+
+            st.dataframe(styled, width="stretch", height=600, hide_index=True)
+
+            csv_data = disp_df.to_csv(index=False).encode("utf-8")
+            st.download_button(
+                label="⬇️ Download CSV",
+                data=csv_data,
+                file_name=f"momentum_top100_{m_date.strftime('%Y%m%d')}_{m_idx.replace(' ', '_')}.csv",
+                mime="text/csv",
+                key="mom_csv_dl",
+            )
+
+        with tab_chart:
+            factor_cols = {
+                "f1_12m": "1Y Return (50%)",
+                "f3_ema100": "100 EMA Dist (35%)",
+                "f4_vol": "Rel Volume (15%)",
+            }
+            avail = {k: v for k, v in factor_cols.items() if k in m_df.columns}
+            if avail:
+                top20 = m_df.head(20).copy()
+                top20["Label"] = top20["Name"].apply(
+                    lambda s: s.split(":")[-1].replace("-EQ", "").replace("-BE", "")
+                )
+                bar_colors = ["#6366f1", "#22d3ee", "#10b981", "#f59e0b", "#f87171"]
+                fig_bd = go.Figure()
+                for (fcol, flabel), color in zip(avail.items(), bar_colors):
+                    fig_bd.add_trace(go.Bar(
+                        name=flabel,
+                        x=top20["Label"],
+                        y=top20[fcol].round(1),
+                        marker_color=color,
+                        opacity=0.85,
+                    ))
+                fig_bd.update_layout(
+                    barmode="stack",
+                    template="plotly_dark",
+                    paper_bgcolor="#0f172a",
+                    plot_bgcolor="#0f172a",
+                    height=480,
+                    margin=dict(l=10, r=10, t=50, b=80),
+                    legend=dict(orientation="h", yanchor="bottom", y=1.02),
+                    yaxis_title="Factor Score (percentile × weight)",
+                    xaxis_tickangle=-40,
+                    font=dict(family="Inter", size=11, color="#94a3b8"),
+                    title=dict(
+                        text=f"<b>Factor Breakdown — Top 20 Stocks</b>  |  As of {m_date.strftime('%d %b %Y')}",
+                        x=0.01, font=dict(size=14, color="#f8fafc"),
+                    ),
+                )
+                st.plotly_chart(fig_bd, use_container_width=True)
+            else:
+                st.info("Factor detail columns not available. Run a new scan.")
+    else:
+        st.markdown("""
+        <div style="text-align:center;padding:4rem 2rem;color:#475569;">
+            <div style="font-size:3rem;margin-bottom:1rem;">🚀</div>
+            <h3 style="color:#64748b;font-weight:500;">Ready to Rank</h3>
+            <p style="max-width:500px;margin:0 auto;font-size:0.9rem;">
+                Select an index universe, pick a date (today or any past date for backtesting),
+                adjust factor weights if needed, then click <b>RUN SCAN</b>.
+            </p>
+        </div>""", unsafe_allow_html=True)
+
